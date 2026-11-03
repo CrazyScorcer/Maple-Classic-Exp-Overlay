@@ -109,6 +109,16 @@ class Platform(ABC):
         """Why other programs' windows can't be seen right now, or None if they can."""
         return None
 
+    def window_capture(self):
+        """A Capture that reads the game's own window instead of the screen, or None where this OS
+        can't give one. Following the game uses it when it's there; a selected area is always a
+        picture of the screen."""
+        return None
+
+    def screen_capture_note(self):
+        """Why a picture of the whole screen can't be read right now, or None if it can."""
+        return None
+
     @abstractmethod
     def find_game_window(self):
         """Handle of the MapleStory game window (the biggest, if there are several), or None."""
@@ -132,6 +142,11 @@ class Platform(ABC):
     @abstractmethod
     def create_hotkeys(self, on_press):
         """A Hotkeys for this OS."""
+
+    def hotkey_event(self, event):
+        """(Ctrl, Alt, Shift, key) for a tkinter <KeyPress> event, as hotkey_text takes them: Tk's
+        event read the Windows way, for an OS whose Tk numbers the same keys differently to say so."""
+        return bool(event.state & 0x4), bool(event.state & 0x20000), bool(event.state & 0x1), event.keycode
 
     @abstractmethod
     def open_folder(self, path):

@@ -1038,7 +1038,7 @@ def part_reader(templates=True):
     return r
 
 # a capture that sees through windows: our window over the EXP bar changes nothing in the read, but the geometry still says "covering"
-from capture import Capture, ScreenCapture  # noqa: E402
+from capture import Capture, ScreenCapture, WindowCapture  # noqa: E402
 
 
 class SeeThrough(ScreenCapture):
@@ -1416,6 +1416,48 @@ for cap_class, wanted in ((ScreenCapture, False), (SeeThrough, True)):
           again.confident if wanted else "covering" in again.where)
     check(f"{cap.name} capture: diagnostics() names the capture and still lists the EXP bar as covered",
           r.diagnostics()["capture"] == cap.name and "EXP bar" in r.diagnostics()["covering"])
+
+
+class FakeWindow:
+    """A window at `at` showing `bgr`, for capture.WindowCapture (no screen and no X server needed)."""
+
+    def __init__(self, bgr, at=(0, 0)):
+        self.bgr, self.at, self.calls = bgr, at, []
+
+    def rect(self):
+        return self.at[0], self.at[1], self.bgr.shape[1], self.bgr.shape[0]
+
+    def grab(self, x, y, width, height):
+        self.calls.append((x, y, width, height))
+        return self.bgr[y:y + height, x:x + width]
+
+
+window = FakeWindow(np.zeros((300, 400, 3), np.uint8), at=(100, 50))
+wcap = WindowCapture(window)
+part = wcap.grab(150, 80, 200, 100)                    # (only part of it is on the window)
+check("a window capture asks the window for the part of the rectangle it has, and says where it was",
+      part is not None and part[1:] == (150, 80) and window.calls == [(50, 30, 200, 100)]
+      and part[0].shape[:2] == (100, 200))
+check("...and gives nothing for a rectangle that is off the window",
+      wcap.grab(0, 0, 20, 20) is None and wcap.grab(150, 80, 5, 5) is None)
+check("a window capture is named 'window' and sees through what is on top of it",
+      wcap.name == "window" and wcap.sees_through_windows)
+r = m.ScreenReader(m.DigitTemplates.load())
+wcap = WindowCapture(FakeWindow(frame))
+first = r._read_window(wcap, rect_f)
+bx, by, bw, bh = r.box
+r.own_rect = (bx, by, bw, bh)                          # this window right on top of the bar
+r.last_rect, r.gh = rect_f, r.gh
+again = r._read_window(wcap, rect_f)
+check("following the game reads the bar from the game window's own pixels, even under this window",
+      first.confident and again.confident)
+r = m.ScreenReader(m.DigitTemplates.load())
+plain = WindowCapture(FakeWindow(frame), sees_through=False)     # (no compositing desktop)
+first = r._read_window(plain, rect_f)
+bx, by, bw, bh = r.box
+r.own_rect, r.last_rect, r.gh = (bx, by, bw, bh), rect_f, r.gh
+check("a window capture without a compositing desktop still says this app's window is in the way",
+      first.confident and "covering" in r._read_window(plain, rect_f).where)
 check("the bare fake screen is wrapped as a screen copy", isinstance(m.as_capture(FakeScreen(frame)), ScreenCapture)
       and isinstance(m.as_capture(SeeThrough(None)), Capture))
 

@@ -283,7 +283,16 @@ run.bat
 
 **How to run it on a Mac:** `brew install tesseract`, then `python3 -m pip install -r requirements.txt` and `python3 maple_exp.py`. The first time, allow your Terminal (or Python) in **System Settings > Privacy & Security > Screen Recording**, then start it again. The window is found by "MapleStory" in its title; if it isn't, use **Select area**. Hotkeys aren't available on macOS yet.
 
-Everything that differs between Windows and macOS (finding the game window, screen scaling, hotkeys, the one-copy-at-a-time lock) is in `platforms/`: one `Platform` interface in `base.py`, one implementation per OS, and `create_platform()` picks the one for the OS it's on.
+**On Linux** (from source, with the game running through Steam/Proton, Lutris or Wine): install Tesseract (`sudo apt install tesseract-ocr`, `sudo pacman -S tesseract`, or your distribution's package), then
+
+```
+python3 -m pip install -r requirements.txt
+python3 maple_exp.py
+```
+
+The window is found by "MapleStory" in its title or window class (Wine, Proton and Lutris name the program after the game's `.exe`, which is how it's told apart from a browser tab). Following the game reads the game's **own window**, so this app can sit on top of the EXP bar, and it works in a Wayland session too. **Select area** is a picture of the whole screen, which a Wayland session doesn't allow: log in with X11 (Xorg) to use that. Hotkeys work while MapleStory or the overlay is in front.
+
+Everything that differs between Windows, macOS and Linux (finding the game window, screen scaling, hotkeys, the one-copy-at-a-time lock) is in `platforms/`: one `Platform` interface in `base.py`, one implementation per OS, and `create_platform()` picks the one for the OS it's on.
 
 **Build the download** (puts `Maple-Classic-Exp-Overlay-v<version>.zip` in `release/`, and a copy to use right away in the project folder: `Maple Classic Exp Overlay.exe` with its `_internal` folder):
 

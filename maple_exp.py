@@ -11,9 +11,9 @@ map, level and party size.
 
 It only looks at the screen: it never reads or changes the game's files or memory and
 never sends input to the game. Your settings and log are kept in the MapleEXP folder
-inside %APPDATA% on Windows, ~/Library/Application Support on macOS (named after its old
-name, Maple EXP/hr, so updating keeps them). It runs on Windows and macOS: what differs
-between them is in platforms/.
+inside %APPDATA% on Windows, ~/Library/Application Support on macOS and ~/.local/share on Linux
+(named after its old name, Maple EXP/hr, so updating keeps them). It runs on Windows, macOS and
+Linux: what differs between them is in platforms/.
 """
 import contextlib
 import hashlib
@@ -69,7 +69,7 @@ from ui_kit import (ACCENT, ACCENT_SOFT, BAD, BG, DIM, FAINT, FG, GOOD, LINE, LI
                     ON_ACCENT, RAISED, RAISED_HI, SELECT, SURFACE, WARN, setup_ttk)
 from ui_main import SHAPES, Button, MainView, PopupMenu, Slider, Theme, Toggle
 
-# Everything that differs between Windows and macOS (finding the game window, screen scaling,
+# Everything that differs between Windows, macOS and Linux (finding the game window, screen scaling,
 # hotkeys...) is behind this one object: see platforms/.
 PLATFORM = create_platform()
 PLATFORM.setup_process()
@@ -2060,6 +2060,9 @@ class ScreenReader:
         self.last_rect = rect
         if self.mode == "region":
             reading = self._read_region(capture, rect)
+            note = PLATFORM.screen_capture_note()       # (e.g. a Wayland session: no picture of the screen)
+            if note and reading.exp_kind == "not_found":
+                reading = reading._replace(where=_problem("Selected area", note))
         elif not self.hwnd and PLATFORM.missing_permission():
             return Reading(PLATFORM.missing_permission(), exp_kind="no_window")
         elif not self.hwnd:
@@ -5449,7 +5452,7 @@ class App:
             elif e.keysym in ("BackSpace", "Delete"):
                 done(action, "")
             else:
-                key = hotkey_text(bool(e.state & 0x4), bool(e.state & 0x20000), bool(e.state & 0x1), e.keycode)
+                key = hotkey_text(*PLATFORM.hotkey_event(e))
                 if not key:
                     hint.set("Use Ctrl, Alt or Shift with a number or letter, or an F key.")
                     return "break"
@@ -5509,14 +5512,18 @@ class App:
         while not self.stop_evt.is_set():
             try:
                 with mss.mss() as sct:
-                    capture = ScreenCapture(sct)
+                    screen = ScreenCapture(sct)
+                    window = PLATFORM.window_capture()  # (a window this OS can read directly: see capture.WindowCapture)
                     opened = time.monotonic()
                     # (opened again every SCREEN_LIST_SECONDS: mss keeps the list of screens it first saw, so a monitor
                     # plugged in or out, or a new resolution, would leave the game "off screen" until a restart)
                     while not self.stop_evt.is_set() and time.monotonic() - opened < SCREEN_LIST_SECONDS:
                         t0 = time.monotonic()
                         try:
-                            reading = self.reader.read(capture)
+                            # Following the game reads its own window where the OS can, so what is on top
+                            # of the game doesn't matter; a selected area is a picture of the screen.
+                            source = window if window and getattr(self.reader, "mode", "") == "window" else screen
+                            reading = self.reader.read(source)
                             self.q.put(("reading", reading._replace(ms=(time.monotonic() - t0) * 1000)))
                             self.health.finished(t0)
                         except Exception as e:
@@ -6825,9 +6832,13 @@ class App:
         if not rect:
             return None
         try:
-            with mss.mss() as sct:
-                # (always a screen copy, whatever the reader uses: it shows what is on screen, this window hidden)
-                shot = self.reader._hide_own(grab(sct, *rect), screen_copy=True)
+            source = self.reader.capture
+            if source.sees_through_windows:          # (the game's own window: this app's window isn't in it)
+                shot = source.grab(*rect)
+            else:
+                with mss.mss() as sct:
+                    # (a copy of the screen shows what is on screen, so this window is blacked out in it)
+                    shot = self.reader._hide_own(grab(sct, *rect), screen_copy=True)
             if not shot:
                 return None
             img = Image.fromarray(cv2.cvtColor(shot[0], cv2.COLOR_BGR2RGB))

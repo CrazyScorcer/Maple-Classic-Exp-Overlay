@@ -83,3 +83,37 @@ jobs:
         run: python tests/test_ocr.py
       - name: Window tests (the notes box, in the real window)
         run: python tests/test_ui.py
+
+  linux:
+    # The overlay can also run from source on Linux (the game through Steam/Proton, Lutris or Wine).
+    # There's no Linux download, so this only needs to prove the code works there. Xvfb gives the
+    # window code a real X server to talk to (there's no game, so only its "not found" ways run).
+    # test_ui isn't run here: some of its checks expect text to fit a box to the pixel, and X11's own
+    # text measuring doesn't quite match the other OSes' (the layout copes by itself, e.g. it shows a
+    # shorter label rather than a clipped one).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install Tesseract, Xvfb and the packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr xvfb
+          python -m pip install -r requirements.txt
+      - name: Logic tests
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python tests/test_logic.py
+      - name: Screen-reading tests
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python tests/test_screen.py
+      - name: Health report tests
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python tests/test_health.py
+      - name: Reader v2 shared pieces tests
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python tests/test_v2.py
+      - name: Bug report tests
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python tests/test_report.py
+      - name: Text-reading tests (Tesseract, when installed)
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python tests/test_ocr.py
+

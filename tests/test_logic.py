@@ -252,7 +252,8 @@ for name, bad in (("a string", "x"), ("a 2 MB string", "a" * 2_000_000), ("a lis
         cfg = m.load_config()
         check(f"{key} damaged as {name} is dropped, ui_scale kept", key not in cfg and cfg["ui_scale"] == 150)
 check(f"the right OS backend is made for {sys.platform} ({type(m.PLATFORM).__name__})",
-      type(m.PLATFORM).__name__ == {"win32": "WindowsPlatform", "darwin": "MacPlatform"}.get(sys.platform))
+      type(m.PLATFORM).__name__ == {"win32": "WindowsPlatform", "darwin": "MacPlatform",
+                                    "linux": "LinuxPlatform"}.get(sys.platform))
 try:
     m.create_platform("plan9")
     unsupported = False
@@ -287,6 +288,29 @@ if sys.platform == "darwin":
           and not macos.is_game(W(4, 99, "Python", "MapleStory", 0, (0, 0, 800, 600), True), 99)
           and not macos.is_game(W(5, 13, "wine64-preloader", "MapleStory", 25, (0, 0, 800, 600), True), 99))
     check("macOS windows can be listed", isinstance(macos.window_list(), list))
+if sys.platform.startswith("linux"):
+    from platforms import linux
+    W = linux.LinuxWindow
+    check("on Linux the game is told apart from browsers, Steam's pages and the overlay itself",
+          linux.is_game(W(1, 17319, "steam_app_216150", "MapleStory", "MapleStory.exe", (0, 0, 800, 600), False), 99)
+          and linux.is_game(W(2, 100, "MapleStory.exe", "", "MapleStory.exe", (0, 0, 800, 600), False), 99)
+          and not linux.is_game(W(3, 101, "steamwebhelper", "MapleStory", "steamwebhelper", (0, 0, 800, 600), False), 99)
+          and not linux.is_game(W(4, 102, "google-chrome", "MapleStory Classic guide", "chrome", (0, 0, 800, 600), False), 99)
+          and not linux.is_game(W(5, 99, "tk", "MapleStory", "python3", (0, 0, 800, 600), False), 99)
+          and not linux.is_game(W(6, 103, "steam_app_216150", "MapleStory", "MapleStory.exe", None, False), 99)
+          and not linux.is_game(W(7, 104, "steam_app_216150", "MapleStory", "MapleStory.exe", (0, 0, 800, 600), True), 99))
+    check("Linux windows can be listed (none at all without a display)", isinstance(linux.window_list(), list))
+    check("a hotkey read on Linux is the same key Windows would name",
+          linux.keysym_to_vk("a") == 0x41 and linux.keysym_to_vk("1") == 0x31
+          and linux.keysym_to_vk("F12") == 0x7B and linux.keysym_to_vk("Tab") is None)
+    # Following the game reads the game's own window, so this needs one to be running.
+    games = [w for w in linux.window_list() if linux.is_game(w, os.getpid())]
+    capture = linux.LinuxPlatform().window_capture() if games else None
+    rect = capture.window.rect() if capture else None
+    shot = capture.grab(*rect) if rect else None
+    check("a running game window's place on screen is read, and its own pixels with it "
+          "(no game, or one that's minimized: nothing to check)",
+          not games or rect is None or (shot is not None and shot[0].shape[2] == 3 and shot[1:] == rect[:2]))
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 # B06-1: hostile release notes / version names (a broken or tampered GitHub answer) can't freeze or stretch the overlay
