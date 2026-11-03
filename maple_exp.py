@@ -49,9 +49,10 @@ import mss
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from capture import ScreenCapture, as_capture, grab  # noqa: F401
+from capture import ScreenCapture, WindowCapture, as_capture, black_out, grab  # noqa: F401
 import digits_v2
 import exp_font
+import filter_ui
 import healthlog
 import level_ocr
 import mesos_v2
@@ -75,7 +76,8 @@ PLATFORM = create_platform()
 PLATFORM.setup_process()
 cv2.setNumThreads(1)
 
-VERSION = "0.9.15-beta"
+VERSION = "0.9.16-beta"
+TEST_BUILD_MARK = "-mactest"         # a Mac test build calls itself e.g. 0.9.16-mactest.1 and sends nothing
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -103,6 +105,7 @@ LOG_BLOCK = 300             # seconds of non-stop EXP gain behind each log updat
 MESOS_PATH = DATA_DIR / "mesos_digits.npz"             # learned as you play...
 MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
 MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
+FILTER_BAR_PATH = ASSETS / "filter_bar.npz"     # the status bar the filtered-UI probe compares with (filter_ui.py)
 MAPS_PATH = ASSETS / "maps.txt"            # the game's map names (see server/tools/make_maps.py)
 MAP_HIDDEN_SECONDS = 3      # the minimap's name unseen this long: say so, and hold back saving to the log
 MAP_BLIND_SECONDS = 45      # the minimap's name box unseen this long: the map may have changed unnoticed
@@ -135,13 +138,25 @@ MAX_COORD = 100_000        # a screen position or size in the settings; more is 
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True,
             "details": False, "compact_shape": "square", "seen_version": "",
-            "potions_on": True, "potion_prices": {}, "shadow_reader": True}
+            "potions_on": True, "potion_prices": {}, "shadow_reader": True, "no_reset": False}
 SHAPE_LABELS = {"square": "Square", "wide": "Wide", "bar": "Bar"}
 SHAPE_BLURBS = {"square": "The narrow card: the big number, the level bar and Start/Pause.",
                 "wide": "Longer sideways: the level bar on top and four numbers in a row.",
                 "bar": "One thin strip with the main numbers and a slim level bar."}
 # What's new, shown once after updating to a version (plain words, newest changes only). A version with no entry shows nothing.
-WHATS_NEW = {"0.9.15-beta": (
+WHATS_NEW = {"0.9.16-beta": (
+    (None, None, (
+        ("head", "No Reset"),
+        "A new switch under the numbers (and in Settings) for farming that moves between maps: changing maps no "
+        "longer starts new numbers. Runs made with it on stay on your PC (they're not sent to the best-maps site).",
+        ("head", "Default Ratio (Filter Applied)"),
+        "Playing with this game setting on? The EXP number, party size, map name, mesos and potion counts are now "
+        "read with it on too. The overlay notices it by itself after a few seconds. Checked on recordings of real play: tell me "
+        "if a number looks off.",
+        ("head", "A Mac download, as a test"),
+        "There's now a Mac download (Apple Silicon and Intel). I don't have a Mac, so I haven't tested it myself: "
+        "if you try it, tell me if it works.")),),
+    "0.9.15-beta": (
     (None, None, (
         ("head", "EXP and party size, read the new way"),
         "The EXP number and your party size are now read with the game's own font and the exact shape of the party "
@@ -475,14 +490,18 @@ def post_runs(install, runs, timeout=15):
 
 def sharing_blocked():
     """True while testing: MAPLE_EXP_DATA moves the data folder, which only tests do, and what a test holds is
-    made up, so nothing is sent unless MAPLE_EXP_ALLOW_SHARE says so."""
+    made up, so nothing is sent unless MAPLE_EXP_ALLOW_SHARE says so. Also always true in a Mac test build (its
+    VERSION has TEST_BUILD_MARK, put there by release_plan.py): that one sends and checks nothing, whatever
+    MAPLE_EXP_ALLOW_SHARE says."""
+    if TEST_BUILD_MARK in VERSION:
+        return True
     return bool(os.environ.get("MAPLE_EXP_DATA") and not os.environ.get("MAPLE_EXP_ALLOW_SHARE"))
 
 
 def newer_health_key(field, body):
     """Is `field`, which the site refused, something only a newer overlay sends (so the site is the one that's old)?"""
     ms = body.get("ms") if isinstance(body, dict) else None
-    return (field in healthlog.V2_KEYS and field in body) or (
+    return (field in healthlog.NEW_KEYS and field in body) or (
         field == "ms" and isinstance(ms, dict) and any(k in ms for k in healthlog.V2_MS))
 
 
@@ -524,8 +543,13 @@ def post_health(body, timeout=15):
 # Shift+1 to 4 by default (changeable in Settings). How they're caught is up to the OS
 # (PLATFORM.create_hotkeys); they're only on while MapleStory or the overlay is in front.
 
-HOTKEY_ACTIONS = {"start": "Start / Pause", "reset": "Reset", "skip": "Don't log", "compact": "Compact"}
-DEFAULT_HOTKEYS = {"start": "Shift+1", "reset": "Shift+2", "skip": "Shift+3", "compact": "Shift+4"}
+HOTKEY_ACTIONS = {"start": "Start / Pause", "reset": "Reset", "skip": "Don't log", "compact": "Compact",
+                  "no_reset": "No Reset"}
+DEFAULT_HOTKEYS = {"start": "Shift+1", "reset": "Shift+2", "skip": "Shift+3", "compact": "Shift+4", "no_reset": ""}
+NO_RESET_ON = ("No Reset is on: changing maps or going AFK won't start new numbers. "
+               "These runs stay on this PC (not sent to mcwo.app).")
+NO_RESET_OFF = "No Reset is off: a new map starts new numbers again."
+MAPS_JOIN = "/"           # a log line or run over several maps (No Reset): "Map A/Map B" (no real map name has one)
 
 
 # --------------------------------------------------------------------------- screenshots
@@ -744,10 +768,15 @@ def _v2_text_mask(V, width=None, tiled=False):
     return D >= V2_TEXT * top, D >= (V2_FAINT / 2 if tiled else V2_FAINT) * top
 
 
-def _v2_has_feet(V, b):
+V2_SIDE = 2             # px each side of a bracket that its feet test looks at...
+V2_SIDE_FILTERED = 1    # ...and with the game's filter on (the sharpened digit next to "[" is one px closer, F04)
+
+
+def _v2_has_feet(V, b, side=V2_SIDE):
     """True if the stroke at blob b has short feet: more brightness in its top and bottom fifth than in
-    its middle (a digit "1" or a letter "l" has a plain end)."""
-    x0, x1 = max(0, b.x - 2), b.x + b.w + 2
+    its middle (a digit "1" or a letter "l" has a plain end). `side` px on each side of it are looked at: the
+    digit next to a bracket must not reach in and fill its middle."""
+    x0, x1 = max(0, b.x - side), b.x + b.w + side
     win = V[max(0, b.y - 1):b.y + b.h + 1, x0:x1].astype(np.float32)
     win = (win - win.min(axis=1, keepdims=True)).sum(axis=1)[1:-1]
     z = max(2, int(round(0.2 * len(win))))
@@ -756,7 +785,7 @@ def _v2_has_feet(V, b):
     return min(win[:z].mean(), win[-z:].mean()) >= 1.12 * max(float(np.median(win[z:-z])), 1.0)
 
 
-def _v2_bracket_side(sub, V, b):
+def _v2_bracket_side(sub, V, b, side=V2_SIDE):
     """'[' or ']' if the blob mask (bool, h x w) is a thin vertical stroke with feet at the top and the
     bottom pointing inwards; '|' if the feet are there but the side can't be told (a small or blurred
     bracket); else None."""
@@ -766,7 +795,7 @@ def _v2_bracket_side(sub, V, b):
     col = sub.sum(axis=0)
     half = max(1, (w + 1) // 2)
     left, right = col[:half].max(), col[w - half:].max()
-    if max(left, right) < 0.7 * h or not _v2_has_feet(V, b):
+    if max(left, right) < 0.7 * h or not _v2_has_feet(V, b, side):
         return None
     if left >= 0.7 * h and right <= 0.5 * h:
         return "["
@@ -811,12 +840,13 @@ def _v2_percent_glyph(_cache=[]):
     return _cache[0]
 
 
-def find_exp_v2(bgr, hint=None, spots=(), whole=True):
+def find_exp_v2(bgr, hint=None, spots=(), whole=True, filtered=False):
     """Locate the EXP text in a screenshot by shape and contrast, not colour. Returns a Layout
     (the same as find_exp) or None. hint is a box (x0, y0, x1, y1) where the bar was last seen: it
     is searched first (the Layout's box and cy say where it was found, to remember for next time).
     spots are boxes where the bar should be at each UI scale the game might use (exp_font.expected_spots):
-    tried next, cheap, before the whole picture is searched (whole=False: never search it, only those boxes)."""
+    tried next, cheap, before the whole picture is searched (whole=False: never search it, only those boxes).
+    filtered: the game's filter is on (ScreenReader.filtered): the bracket test is a little tighter around the bracket."""
     if bgr.size == 0:
         return None
     if bgr.ndim == 2 or (bgr.ndim == 3 and bgr.shape[2] == 1):      # (a grey or BGRA picture is read like a BGR one)
@@ -826,13 +856,13 @@ def find_exp_v2(bgr, hint=None, spots=(), whole=True):
     elif bgr.shape[2] > 3:
         bgr = bgr[:, :, :3]
     for box in ([hint] if hint is not None else []) + list(spots or ()):
-        lay = _find_exp_v2_in(bgr, box)
+        lay = _find_exp_v2_in(bgr, box, filtered)
         if lay:
             return lay
-    return _find_exp_v2(bgr) if whole else None
+    return _find_exp_v2(bgr, None, filtered) if whole else None
 
 
-def _find_exp_v2_in(bgr, box):
+def _find_exp_v2_in(bgr, box, filtered=False):
     """The Layout found inside one box of the picture (in the whole picture's coordinates), or None."""
     H, W = bgr.shape[:2]
     try:
@@ -842,7 +872,7 @@ def _find_exp_v2_in(bgr, box):
         return None
     if x1 - x0 <= 8 or y1 - y0 <= 8:
         return None
-    lay = _find_exp_v2(bgr[y0:y1, x0:x1], W)
+    lay = _find_exp_v2(bgr[y0:y1, x0:x1], W, filtered)
     if not lay:
         return None
     V = np.zeros(bgr.shape[:2], np.float32)         # only the searched box is filled in: all the digits need
@@ -852,7 +882,7 @@ def _find_exp_v2_in(bgr, box):
     return Layout(lay.gh, lay.cy + y0, sh(lay.exp), sh(lay.pct), (b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0), V)
 
 
-def _v2_bracket_candidates(mask, V8, have):
+def _v2_bracket_candidates(mask, V8, have, side=V2_SIDE):
     """Brackets in a text mask: thin tall blobs that have a partner of the same height to their right on
     the same line (and whose feet and stroke look right). Skips ones already in have."""
     n, glabels, stats, _ = cv2.connectedComponentsWithStats(mask.view(np.uint8), connectivity=8)
@@ -870,35 +900,36 @@ def _v2_bracket_candidates(mask, V8, have):
         b = Blob(int(i), *map(int, stats[i][:4]))
         if any(abs(k.x - b.x) <= 2 and abs(k.y - b.y) <= 2 for k, _ in have):
             continue
-        side = _v2_bracket_side(glabels[b.y:b.y + b.h, b.x:b.x + b.w] == b.i, V8, b)
-        if side:
-            out.append((b, side))
+        kind = _v2_bracket_side(glabels[b.y:b.y + b.h, b.x:b.x + b.w] == b.i, V8, b, side)
+        if kind:
+            out.append((b, kind))
     return out
 
 
-def _find_exp_v2(bgr, width=None):
+def _find_exp_v2(bgr, width=None, filtered=False):
     """(width: the whole screen's width where bgr is only a box of it; it sets the size of the blur.)"""
-    lay = _find_exp_v2_try(bgr, width, False)
+    lay = _find_exp_v2_try(bgr, width, False, filtered)
     if lay is None:
         # Text that is a tiny share of the picture (the small UI on a big screen: a very wide strip) is not
         # what the 99.7th percentile sees: look again asking each stretch alone, and on a very wide strip
         # also with the small blur (the big one runs the text's soft edges together).
-        lay = _find_exp_v2_try(bgr, width, True)
+        lay = _find_exp_v2_try(bgr, width, True, filtered)
         if lay is None and (width or bgr.shape[1]) >= V2_WIDE:
-            lay = _find_exp_v2_try(bgr, 1, True)
+            lay = _find_exp_v2_try(bgr, 1, True, filtered)
     return lay
 
 
-def _find_exp_v2_try(bgr, width, tiled):
+def _find_exp_v2_try(bgr, width, tiled, filtered=False):
     V8 = _v2_brightness(bgr)
     masks = _v2_text_mask(V8, width, tiled)
     if masks is None:
         return None
     low, faint = masks
-    brackets = _v2_bracket_candidates(low, V8, [])
+    side = V2_SIDE_FILTERED if filtered else V2_SIDE
+    brackets = _v2_bracket_candidates(low, V8, [], side)
     lay = _v2_pair_up(low, V8, brackets)
     if lay is None:                    # a blur can cut the paler brackets short: look again with the softer mask
-        brackets += _v2_bracket_candidates(faint, V8, brackets)
+        brackets += _v2_bracket_candidates(faint, V8, brackets, side)
         lay = _v2_pair_up(low, V8, brackets)
     return lay
 
@@ -1376,7 +1407,11 @@ def is_town(name):
 
 
 def read_map_name(bgr, gh):
-    """The map name (the lower line of white text) from a shot of the minimap's info box."""
+    """The map name (the lower line of white text) from a shot of the minimap's info box.
+
+    A name that isn't on the game's list is taken only if every try says the same: Tesseract drops a last "I" or turns
+    "p" and "y" into "n" and "v" in some tries (the filter's sharpening, F07; a 1.56 UI scale on Default, F14), and a
+    plurality of those is a wrong name. Event maps not on the list are still read when all tries agree."""
     white = _whiteness(bgr[:, int(0.85 * bgr.shape[0]):])      # skip the map's icon
     _, blobs = _blobs(white > 0.5)
     glyphs = sorted((b for b in blobs if 0.3 * gh <= b.h <= 1.6 * gh and b.w <= 2.5 * gh),
@@ -1396,7 +1431,11 @@ def read_map_name(bgr, gh):
     y0, y1 = max(0, min(b.y for b in ln) - 2), max(b.y + b.h for b in ln) + 2
     votes = _ocr_votes(white[y0:y1, x0:x1], max(b.h for b in ln), None, _clean_map_name)
     name, n = votes.most_common(1)[0] if votes else (None, 0)
-    return snap_map_name(name) if n >= 2 else None
+    if n < 2:
+        return None
+    if map_list().find(name) is None and n < sum(votes.values()):
+        return None
+    return snap_map_name(name)
 
 
 # --------------------------------------------------------------------------- mesos and party
@@ -1454,6 +1493,19 @@ def find_trade_mesos_box(bgr, gh, hsv=None):
                 and area >= 0.6 * w * h):
             found.append((x, y, w, h))
     return max(found) if found else None
+
+
+STORAGE_SPACING = 1.618     # a storage window's two mesos boxes (the stored mesos, yours) are 208 design px = this many box widths apart
+
+
+def storage_pair(fields):
+    """(stored mesos box, yours) among the mesos boxes found while a storage window is open, or None. The two panels'
+    boxes sit side by side at one fixed spacing; a hand cursor over the coin of yours leaves only the stored box and some
+    other one, and the right-hand of those two is not yours (F08, F15). A pair found at the spacing: yours is the right one."""
+    pairs = [(a, b) for a in fields for b in fields
+             if abs(b[1] - a[1]) <= 0.2 * a[3] and abs(b[2] - a[2]) <= 0.05 * a[2]
+             and abs(b[0] - a[0] - STORAGE_SPACING * a[2]) <= 0.03 * a[2]]
+    return pairs[0] if len(pairs) == 1 else None
 
 
 MONEY_COLOURS = {"orange": ((6, 150, 170), (16, 255, 255)),        # TAKE OUT, BUY ITEM, TRADE...
@@ -1571,6 +1623,18 @@ def _mesos_strokes(bgr, field):
     return Layout(0.615 * h, y + 0.525 * h, [], [], (0, 0, 0, 0), strokes)
 
 
+MESOS_END_INK = 0.5     # the cell that ends a number may hold at most this much ink, against the number's own digits
+MESOS_DROP_INK = 0.2    # ...and this much when the number has fewer digits than at the look before
+
+
+def _mesos_ink(lay, field, i):
+    """How much ink (95th percentile of the strokes) the cell of the i-th digit from the right of the mesos box holds."""
+    x, y, w, h = field
+    cx, half = _mesos_spot(field, i), 0.45 * MESOS_PITCH * h
+    cell = lay.V[max(0, int(round(y + 0.225 * h))):int(round(y + 0.825 * h)), max(0, int(round(cx - half))):int(round(cx + half))]
+    return float(np.percentile(cell, 95)) if cell.size else 0.0
+
+
 def mesos_box_lines_up(bgr, field, templates):
     """For a box found by its outline: does its right edge line up with the number? The
     first digit must match very clearly (in the wrong place the box's border can pass for
@@ -1582,7 +1646,7 @@ def mesos_box_lines_up(bgr, field, templates):
     return first >= 0.85 and after < 0.84
 
 
-def read_mesos_positions(bgr, field, templates, digit_count=None):
+def read_mesos_positions(bgr, field, templates, digit_count=None, end_ink=None):
     """Reads the mesos box digit by digit at the spots the game draws them.
 
     Nothing has to be separated from the background first, so it also works when the
@@ -1590,12 +1654,13 @@ def read_mesos_positions(bgr, field, templates, digit_count=None):
     or clearly not one, and once the number ends none of the next few spots to its left
     may be a clear digit, so a digit lost in a busy background can't silently shorten the
     number from the middle. If digit_count is given, the number must have exactly that many digits (which
-    also catches a lost first digit). Returns (number, Layout, weakest score, weakest lead),
-    or None.
+    also catches a lost first digit). The cell that ends the number must be a blank: if it holds more than
+    end_ink (MESOS_END_INK) of the digits' own ink, a digit may be hidden there and nothing is read. Returns
+    (number, Layout, weakest score, weakest lead), or None.
     """
     x, y, w, h = field
     lay = _mesos_strokes(bgr, field)
-    digits, cells, scores, leads, ended = "", [], [], [], 0
+    digits, cells, scores, leads, ended, end_at = "", [], [], [], 0, None
     for i in range(16):
         cx = _mesos_spot(field, i)
         if cx - 0.3 * h < x:
@@ -1615,11 +1680,15 @@ def read_mesos_positions(bgr, field, templates, digit_count=None):
             scores.append(score)
             leads.append(lead)
         elif empty:
-            ended = 1                                 # the number ends here
+            ended, end_at = 1, i                      # the number ends here
         else:
             return None                               # unclear: don't guess
     if not digits or (len(digits) > 1 and digits[0] == "0"):
         return None
+    if end_at is not None:
+        own = np.median([_mesos_ink(lay, field, j) for j in range(end_at)])
+        if _mesos_ink(lay, field, end_at) > (MESOS_END_INK if end_ink is None else end_ink) * own:
+            return None       # the cell where the number "ends" holds ink: a digit under a cover or a cursor, not a blank
     if scores[-1] < 0.85:
         return None          # the first digit must be very clear: a see-through box's background
                              # can pass for an extra '1' in front (real first digits score ~0.95)
@@ -1817,9 +1886,9 @@ def find_party_bars(bgr, gh, hsv=None):
 
 Reading = namedtuple("Reading", "where candidates confident text image boxes map note "
                                  "mesos mesos_image mesos_boxes party mesos_at window bar percent_only level exp_kind tries ms shadow v2_at "
-                                 "shadow_why ui layout shadows",
+                                 "shadow_why ui layout shadows filter",
                      defaults=((), False, "", None, (), None, None, None, None, (), None, None, None, None, False, None,
-                               None, (), None, None, None, None, None, None, ()))
+                               None, (), None, None, None, None, None, None, (), None))
 # percent_only: the bar shows just "[58.47%]" (candidates are then [(None, pct)]); level: the level read
 # from the status bar's LV badge, with where it came from, as (level, source), or None
 # exp_kind, tries and ms are for health reports (healthlog.py): how the EXP look went (read, tesseract, unclear,
@@ -1830,7 +1899,8 @@ Reading = namedtuple("Reading", "where candidates confident text image boxes map
 # shadow_why, ui, layout and shadows are for health reports too: why reader v2 didn't read the EXP bar when today's
 # reader did ("not_found" / "unclear", only with an old_only shadow); the UI size the look knew ("default" / "ideal",
 # from the EXP digit height); the potion bar's layout when the finder found it (potion_bar.LAYOUTS); and what the
-# other parts' shadows did this look, (part, what happened, v2's milliseconds) each
+# other parts' shadows did this look, (part, what happened, v2's milliseconds) each; filter: the game's
+# "Default Ratio (Filter Applied)" state the look saw (ScreenReader.filter_state), None when it didn't get that far
 
 
 def _view(img, lay):
@@ -1937,7 +2007,7 @@ class ScreenReader:
         self.error_types = Counter()        # ...and by exception type name (never the message)
         self.part_failed_at = {}            # part -> when it last failed, until a later try works
         self._part_logged = {}              # part -> (when errors.log last heard of it, failures skipped since)
-        self.shadow = shadow.Shadow(find_exp_v2, digits_v2.read_layout_v2, fits_exp_table, exp_font.load, _view,
+        self.shadow = shadow.Shadow(self._find_exp_v2, digits_v2.read_layout_v2, fits_exp_table, exp_font.load, _view,
                                     lambda exc: self._part_failed("reader v2", exc),      # reader v2, beside this one
                                     nobar_seconds=shadow.NOBAR_BY_PART["exp"])
         self.shadow.main = True             # EXP: v2's answer decides, this reader's is the backup (_v2_decides)
@@ -1948,6 +2018,21 @@ class ScreenReader:
         self._part_shadows = []             # (part, what happened, v2's ms) of the other parts' shadows in this look
         self.saved_v2 = {}                  # "WxH/gh" -> where reader v2 found the bar last time (from the config)
         self.v2_spot = None                 # ...and where it has found it in this game window (x0, y0, x1, y1)
+        self._filter = filter_ui.FilterWatch(filter_ui.load_reference(FILTER_BAR_PATH))     # "Default Ratio (Filter Applied)"
+
+    @property
+    def filter_state(self):
+        """Is the game's filtered UI on? "on", "off", "unknown" or "no_effect" (filter_ui.py). A reader uses its
+        filtered assets only when `filtered`; any other answer means Default exactly as before."""
+        return self._filter.state
+
+    @property
+    def filtered(self):
+        return self._filter.filtered
+
+    def _find_exp_v2(self, *args, **kwargs):
+        """find_exp_v2 told whether the game's filter is on (shadow.Shadow calls this)."""
+        return find_exp_v2(*args, filtered=self.filtered, **kwargs)
 
     @contextlib.contextmanager
     def _part(self, part):
@@ -2040,6 +2125,7 @@ class ScreenReader:
         self.window, self.window_until, self.window_box = None, 0.0, False
         self.exp_anchor, self.next_job_read = None, 0.0
         self.next_level_read, self._level_candidate = 0.0, None
+        self._filter.reset()
         self.request_map()
 
     def read(self, capture):
@@ -2058,6 +2144,10 @@ class ScreenReader:
             self._forget_places()
         rect = self._game_rect()
         self.last_rect = rect
+        if self.mode == "window":
+            capture.window_at(self.hwnd, rect)          # (a capture that pictures the game window alone takes it here)
+        with self._part("filter"):                     # (after window_at: on a Mac the probe is cut from that picture)
+            self._look_at_filter(capture, rect)
         if self.mode == "region":
             reading = self._read_region(capture, rect)
             note = PLATFORM.screen_capture_note()       # (e.g. a Wayland session: no picture of the screen)
@@ -2075,6 +2165,9 @@ class ScreenReader:
                 monitors = getattr(getattr(capture, "sct", None), "monitors", None) or []
                 if bottom_off_screen(rect, [(m["left"], m["top"], m["width"], m["height"]) for m in monitors[1:]]):
                     reading = reading._replace(where=OFF_SCREEN_TEXT)
+            if reading.exp_kind in ("not_found", "covered") and reading.where != OFF_SCREEN_TEXT:
+                # (Nexon's Mac app is found by its program name, which needs no permission: the picture is then empty)
+                reading = reading._replace(where=PLATFORM.missing_permission() or reading.where)
         if reading.percent_only and self.mode == "region":
             # (a selected area has no game window around it: no badge to find, so typing the level in is open at once)
             self.level_failures = max(self.level_failures, LEVEL_FAILS_FOR_FALLBACK)
@@ -2094,7 +2187,26 @@ class ScreenReader:
                         self._read_level(capture, rect)
         return self._with_part_notes(reading._replace(
             level=(self.level, "badge") if self.level and reading.percent_only and self.mode == "window" else None,
-            tries=tuple(self._tries), shadows=tuple(self._part_shadows), ui=self._ui_mode(reading, rect) or reading.ui))
+            tries=tuple(self._tries), shadows=tuple(self._part_shadows), ui=self._ui_mode(reading, rect) or reading.ui,
+            filter=self.filter_state))
+
+    def _look_at_filter(self, capture, rect):
+        """Keeps the answer to "is the filtered UI on?" up to date (filter_ui.py): a small picture of the status bar every
+        EVERY seconds, nothing at all where the UI is drawn 1:1. Only a game window has a bar to look at."""
+        watch = self._filter
+        if not (rect and self.mode == "window" and self.hwnd):
+            watch.reset()
+            return
+        known = ui_layout.mode_from_gh(self.gh, rect[3]) if self.gh else None
+        if watch.settle(rect[2], rect[3], known[0] if known else None):
+            return
+        now = time.monotonic()
+        if not watch.due(now):
+            return
+        left, top, w, h = filter_ui.probe_box(rect[2], rect[3])
+        sx, sy = rect[0] + left, rect[1] + top
+        shot = None if self._blocked(sx, sy, w, h) else capture.grab(sx, sy, w, h)
+        watch.feed(now, shot[0] if shot else None, (w, h))
 
     def _ui_mode(self, reading, rect):
         """"default" or "ideal" when this look can tell (the EXP bar was found, so its digit height is this window's),
@@ -2213,7 +2325,7 @@ class ScreenReader:
         look = {}
         try:
             scales = [s for _, s in ui_layout.candidate_scales(rect[3])]
-            seen = level_ocr.read_level(shot[0], wx + ax - shot[1], wy + ay - shot[2], g, scales, look) if shot else None
+            seen = level_ocr.read_level(shot[0], wx + ax - shot[1], wy + ay - shot[2], g, scales, look, self.filtered) if shot else None
         except Exception as e:              # (anything unexpected: not a level, back off)
             look["why"] = f"the level read failed: {e}"
             self._part_failed("level", e)
@@ -2254,16 +2366,9 @@ class ScreenReader:
     def _hide_own(self, shot, screen_copy=False):
         """The screenshot with this app's window blacked out, so it can never read itself. (A capture that
         sees through windows has nothing to hide; screen_copy=True is for a picture taken from the screen.)"""
-        r = self.own_rect
-        if not shot or not r or (self.capture.sees_through_windows and not screen_copy):
+        if self.capture.sees_through_windows and not screen_copy:
             return shot
-        img, sx, sy = shot
-        x0, y0 = max(0, r[0] - sx), max(0, r[1] - sy)
-        x1, y1 = min(img.shape[1], r[0] + r[2] - sx), min(img.shape[0], r[1] + r[3] - sy)
-        if x0 < x1 and y0 < y1:
-            img = img.copy()
-            img[y0:y1, x0:x1] = 0
-        return img, sx, sy
+        return black_out(shot, self.own_rect)
 
     def _covered(self, x, y, w, h, margin=0):
         """Does this app's window overlap (or come within margin px of) the given area?"""
@@ -2494,17 +2599,16 @@ class ScreenReader:
                     if window == "trade" and not fields:            # its chat panel may cover the coin
                         box = find_trade_mesos_box(img, g, hsv)
                         fields = [box] if box else []
-                    if window == "storage" and len(fields) == 2:
-                        fields = [max(fields)]                      # yours is the right-hand one
-                        self.two_boxes = False
+                    if window == "storage":
+                        pair = storage_pair(fields)                 # (stored mesos, yours)
+                        self.two_boxes = not pair                   # (no pair: whose box is whose can't be told, read none)
+                        fields = [pair[1]] if pair else []
                     elif window == "shop":
                         self.two_boxes = False                      # (both would be yours: the first will do)
                     else:
-                        # A storage / trade window outside those cases shows a second mesos box next to
-                        # yours, and which is which can't be told: read neither until it's closed.
+                        # A trade window (or none) can show a second mesos box next to yours, and which
+                        # is which can't be told: read neither until it's closed.
                         self.two_boxes = len(fields) > 1
-                        if window == "storage":
-                            fields = []
                     field = None if self.two_boxes else (fields[0] if fields else None)
                     if field and window == "shop" and field[2] < 16 * g:
                         # (its digits end a little further from the box's right edge)
@@ -2598,7 +2702,14 @@ class ScreenReader:
         for the next one (where the list was, and a party count held while the list is covered or just gone). A held
         count goes to the shadow as unclear: v3 didn't read it this look, so it is never counted as agreeing or not."""
         hint = ui_layout.mode_from_gh(self.gh, wh) if self.gh else None
-        look = self._party_last = self._party_look = party_v3.read_party_v3(img, hint, self._party_last, hsv)
+        look = party_v3.read_party_v3(img, hint, self._party_last, hsv, self.filtered)
+        if self.filter_state == filter_ui.UNKNOWN and look.why == "ok" and look.count == 1:
+            # (the filter isn't known yet: a list drawn filtered reads as "no list" the Default way, which is alone. Look the
+            # filtered way too: a list found there is not alone, and not read either. F12)
+            again = party_v3.read_party_v3(img, hint, None, hsv, True)
+            if again.why == "unclear" or (again.count or 0) >= 2:
+                look = party_v3.PartyLook(None, "unclear", again.scale, again.box, 0)
+        self._party_last = self._party_look = look
         return (None, "unclear") if look.why == "held" else (look.count, look.why)
 
     @staticmethod
@@ -2639,7 +2750,7 @@ class ScreenReader:
         img, sx, sy = shot
         got = ui_layout.mode_from_gh(self.gh, wh) if self.gh and self.mode == "window" else None
         hint = potion_bar.Hint(self.bar_last, got, self.bar_runs)
-        look = potion_bar.read_potions(img, ww, wh, (sx - wx, sy - wy), hint, self.potion_table)
+        look = potion_bar.read_potions(img, ww, wh, (sx - wx, sy - wy), hint, self.potion_table, filtered=self.filtered)
         self.bar_last = potion_bar.bar_from_look(look, ww, wh)
         self.bar_runs = {s.index: s.run for s in look.slots if s.run is not None}
         if not look.seen:
@@ -2666,6 +2777,12 @@ class ScreenReader:
             return None
         return field if read_mesos_positions(img, field, templates) else None
 
+    def _learn_mesos_ok(self):
+        """May the mesos digits of this look be learned (into DATA_DIR/mesos_digits.npz, used on Default screens too)?
+        Only when the game's filter is sure to be off ("off", or "no_effect": the UI is drawn 1:1). While it is on, or
+        not known yet at an enlarged size, the digits are sharpened and would spoil the Default ones."""
+        return self.filter_state in (filter_ui.OFF, filter_ui.NO_EFFECT)
+
     def _read_mesos(self, capture, x, y, w, h):
         """Reads the mesos box at (x, y, w, h) on screen. Returns (number, image, boxes)."""
         capture = self.capture = as_capture(capture)
@@ -2686,6 +2803,10 @@ class ScreenReader:
         learned = self.mesos_digits
         if learned.complete:                          # all ten mesos digits learned
             got = read_mesos_positions(img, (fx, fy, w, h), learned.templates())
+            if got and self.mesos_count and len(str(got[0])) < self.mesos_count:
+                # A number that lost a digit since the last look: spending can do that, but so can a cover over its first
+                # digit (22286 read as 2286), so the cell that ends the number has to be nearly blank.
+                got = read_mesos_positions(img, (fx, fy, w, h), learned.templates(), end_ink=MESOS_DROP_INK)
             if not got:
                 self.mesos_fails += 1
                 return None, img, ()
@@ -2700,7 +2821,7 @@ class ScreenReader:
                 if self.mesos_pending[1] < 3:
                     return None, img, boxes_of(lay)
             self.mesos_count, self.mesos_pending = len(str(value)), (None, 0)
-            if solid and score >= 0.95 and lead >= 0.15:
+            if solid and score >= 0.95 and lead >= 0.15 and self._learn_mesos_ok():
                 learned.learn(lay, value)             # more examples, from very clean looks
             return value, img, boxes_of(lay)
         # Still learning the mesos font: a new number needs Tesseract's OK. On a solid box
@@ -2722,7 +2843,7 @@ class ScreenReader:
         if checked is None or (not solid and checked != value):
             return None, img, boxes
         self.mesos_checked = checked
-        if checked == value or votes == 6:            # two readers agree: learn these digits
+        if (checked == value or votes == 6) and self._learn_mesos_ok():     # two readers agree: learn these digits
             learned.learn(lay, checked)
         return checked, img, boxes
 
@@ -3443,7 +3564,9 @@ class Session:
     After Start it tracks until Pause is pressed, except that it pauses by itself when no
     EXP comes in for `gap` seconds or you leave the map, and carries on at the next EXP
     gain: from zero if that's on a different map, so the numbers are always for the map
-    you're on. Time spent paused never counts, and an idle pause rewinds the clock to the
+    you're on. With `no_reset` (farming across maps) a map change neither pauses nor starts
+    new numbers, and a hidden map name doesn't pause either: only Pause, Reset and the idle
+    pause still apply. Time spent paused never counts, and an idle pause rewinds the clock to the
     last EXP gain. The gain that ends a pause starts the clock again rather than counting,
     just like a log stretch's first gain.
     """
@@ -3457,6 +3580,7 @@ class Session:
         self.map = None             # the map these numbers are for
         self.here = None            # the map you're on now
         self.last_gain = None
+        self.no_reset = False       # No Reset: the numbers carry on across maps
 
     def start(self, now):
         self.on, self.waiting, self.last_gain = True, None, now
@@ -3500,9 +3624,10 @@ class Session:
             self.last_gain = now
         elif self.on and self.waiting and self.waiting != "blind" and rose:
             if self.map and self.here and self.here != self.map:
-                t.new_session()             # a different map: its own numbers
-                self.meso.reset()
-                self.potions.reset()
+                if not self.no_reset:
+                    t.new_session()         # a different map: its own numbers
+                    self.meso.reset()
+                    self.potions.reset()
                 self.map = self.here
             self.waiting = None
             self.last_gain = now
@@ -3519,7 +3644,7 @@ class Session:
         closed it): you may have changed maps without it noticing, so it pauses instead of
         carrying on under the old name. It carries on once the name can be read again."""
         self.here = None
-        if self.waiting == "blind" or not self.on:
+        if self.waiting == "blind" or not self.on or self.no_reset:     # (No Reset: another map changes nothing)
             return
         if self.exp.running:
             self._wait("blind")
@@ -3537,6 +3662,10 @@ class Session:
             return
         if self.map is None:
             self.map = name
+        elif name != self.map and self.no_reset:
+            if self.waiting == "idle":
+                self.meso.pause()           # (off the map while idle: a shop trip may follow, as below)
+            self.map = name                 # the numbers carry on: they're for every map since Start
         elif name != self.map:              # left the map
             if self.exp.running:
                 self._wait("map")
@@ -3727,6 +3856,9 @@ class AutoLog:
     Alongside, a run goes on as long as the stretches do (a level-up doesn't stop it, a new
     map or party size does). Every full 15 minutes is saved as a run of its own.
 
+    With `no_reset` on, a map change doesn't start over: the stretch (and run) goes on and is logged under every
+    map it covered ("Map A/Map B"). A run that had No Reset on at any moment stays on this PC (seal "no_reset").
+
     Every change re-reads the log file first and saves straight away, so lines written by
     anyone else (another copy of the app, or by hand) are never overwritten.
     """
@@ -3741,6 +3873,7 @@ class AutoLog:
         self.looks, self.epoch = [], None             # inventory looks (when, mesos gained so far)
         self.pending = None                           # a finished run waiting for a look after its end
         self._misreads = ()                           # the MesoTracker's misreads, as last given
+        self.no_reset = False                         # No Reset: map changes don't start over (see set_no_reset)
         version = self._load()
         if version < 2:
             def clear_old_mesos():                    # logged by the old, unreliable mesos counting
@@ -3877,8 +4010,20 @@ class AutoLog:
         return result
 
     # ---- tracking
+    def set_no_reset(self, on):
+        """No Reset switched on or off. A run going on when it's switched on had it too (it stays on this PC)."""
+        self.no_reset = bool(on)
+        if on and self.run is not None:
+            self.run["no_reset"] = True
+
+    @staticmethod
+    def _maps_label(maps):
+        label = MAPS_JOIN.join(sorted(maps))             # (sorted: the same maps always make the same line)
+        return label if len(label) <= 200 else label[:196] + MAPS_JOIN + "..."    # (a line's map has room for 200)
+
     def reset_clock(self):
         self.start = self.last_gain = self.block_map = self.block_party = self.meso0 = self.pot0 = None
+        self.block_maps, self.block_reads = [], []      # every map (and its name as read) the stretch covered
         self.block_exp = 0
         self.run = None                                  # the 15-minute run going on, if any
         self.chain = None                                # when the runs going on straight after each other began
@@ -3892,7 +4037,7 @@ class AutoLog:
             else:
                 self.block_exp += amount
             if self.run is None:                             # ...and a run's
-                self.run = {"start": now, "exp": 0, "map": None}
+                self.run = self._new_run(now)
                 self.chain = now if self.chain is None else self.chain
             elif not starts:
                 self.run["exp"] += amount
@@ -3924,10 +4069,13 @@ class AutoLog:
         if self.run and now - self.last_gain > SITE_GAP:
             self.run = self.chain = None                     # ...for a run, 15 s is too long
         if map_name:
-            if self.block_map and map_name != self.block_map:
+            if self.block_map and map_name != self.block_map and not self.no_reset:
                 self.reset_clock()                           # changed maps: start over
                 return None
             self.block_map = map_name
+            if map_name not in self.block_maps:
+                self.block_maps.append(map_name)
+                self.block_reads.append(map_read or map_name)
         if self.block_party is not None and party != self.block_party:
             self.reset_clock()                               # party size changed: start over
             return None
@@ -3949,19 +4097,30 @@ class AutoLog:
         if potions is not None and self.pot0 is not None:
             cost = max(0, potions[1] - self.pot0[1])
             used = {n: c - self.pot0[0].get(n, 0) for n, c in potions[0].items() if c > self.pot0[0].get(n, 0)}
-        entry = self._add(self.block_map or "Unknown map", level, party, self.block_exp,
-                          now - self.start, meso_gain, meso_seconds, job, map_read or self.block_map, cost, used,
+        several = len(self.block_maps) > 1
+        entry = self._add(self._maps_label(self.block_maps) if several else self.block_map or "Unknown map", level, party,
+                          self.block_exp, now - self.start, meso_gain, meso_seconds, job,
+                          self._maps_label(self.block_reads) if several else map_read or self.block_map, cost, used,
                           self.block_estimated)
         self.start, self.block_exp, self.block_estimated = now, 0, False       # the next 5 minutes start now
+        self.block_maps, self.block_reads = [self.block_map] if self.block_map else [], [map_read or self.block_map] if self.block_map else []
         self.meso0 = mesos if mesos and now - mesos[1] < 10 else None
         self.pot0 = (dict(potions[0]), potions[1]) if potions is not None else None
         return entry
+
+    def _new_run(self, now):
+        run = {"start": now, "exp": 0, "map": None}
+        if self.no_reset:
+            run["no_reset"] = True
+        return run
 
     def _run_tick(self, now, map_name, level, party, job, map_read, hidden=False, window_at=None, estimated=False,
                   party_read=True):
         r = self.run
         if r is None:
             return
+        if self.no_reset:
+            r["no_reset"] = True                             # (kept to its end, even if switched off meanwhile)
         if r["map"] is None:                                 # what the run is about, once known
             if not map_name:
                 r["start"] = now                             # no map yet: the run can't start
@@ -3969,9 +4128,14 @@ class AutoLog:
                 return
             r.update(map=map_name, map_read=map_read or map_name, party=party, job=job,
                      level_start=level, wall=time.time() - (now - r["start"]),
-                     chain=min(self.chain if self.chain is not None else now, r["start"]))
+                     chain=min(self.chain if self.chain is not None else now, r["start"]),
+                     maps=[map_name], reads=[map_read or map_name])
+        elif map_name and map_name not in r.setdefault("maps", [r["map"]]):     # (No Reset only: else a new map started over)
+            r.setdefault("reads", [r["map_read"]])
+            r["maps"].append(map_name)
+            r["reads"].append(map_read or map_name)
         if job and r["job"] and job != r["job"]:
-            self.run = {"start": now, "exp": 0, "map": None}  # a different class: a new run
+            self.run = self._new_run(now)                    # a different class: a new run
             self.chain = now
             return
         r["job"] = r["job"] or job
@@ -3986,7 +4150,7 @@ class AutoLog:
             return
         if r["exp"] > 0:
             self._end_run(r, now)
-        self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next run
+        self.run = self._new_run(now)                        # straight on into the next run
         self._prune()
         self._run_tick(now, map_name, level, party, job, map_read, hidden, window_at, estimated, party_read)
 
@@ -4015,7 +4179,7 @@ class AutoLog:
         size never read, is never shared: it keeps the mesos between its first and last look. A clean one
         is saved with EXP only and, given a look at its start, waits for one after its end (settle)."""
         seconds = now - r["start"]
-        if (r.get("window") or r.get("estimated") or r.get("party_unread") or r["level_start"] is None
+        if (r.get("window") or r.get("estimated") or r.get("party_unread") or r.get("no_reset") or r["level_start"] is None
                 or r["level"] is None):
             inside = [k for k in self.looks if r["start"] - 2 <= k[0] <= now]
             gain = gain_s = 0
@@ -4122,18 +4286,21 @@ class AutoLog:
 
     def runs_done(self, map_name, party, job, day=None):
         """How many runs were finished (sealed) on a day for a map, party size and class. A run estimated from a %
-        alone carries the seal "estimated" instead: it counts here, it is just never shared."""
+        alone carries the seal "estimated" instead, and one made with No Reset on the seal "no_reset": they count
+        here, they are just never shared."""
         day = day or date.today().isoformat()
         return sum(1 for r in self.runs if r.get("date") == day and r.get("map") == map_name
                    and r.get("party") == party and r.get("class") == job
-                   and (self.sealed(r, _SEALED_RUN) or (r.get("estimated") and r.get("seal") == "estimated")))
+                   and (self.sealed(r, _SEALED_RUN) or (r.get("estimated") and r.get("seal") == "estimated")
+                        or (r.get("no_reset") and r.get("seal") == "no_reset")))
 
     def unshared_runs(self):
         """Finished runs (exactly as the overlay saved them) not shared yet: only clean ones
         (no shop, storage or trade window seen, no EXP estimated from a % alone, a party size that was read), with
         a known level, not waiting for a look."""
         return [r for r in self.runs if not r.get("shared") and not r.get("window") and not r.get("pending")
-                and not r.get("estimated") and not r.get("party_unread") and r.get("level_start") is not None and r.get("level_end") is not None
+                and not r.get("estimated") and not r.get("party_unread") and not r.get("no_reset")
+                and r.get("level_start") is not None and r.get("level_end") is not None
                 and self.sealed(r, _SEALED_RUN)][:50]
 
     def mark_shared(self, started):
@@ -4188,7 +4355,9 @@ class AutoLog:
     def _add_run(self, r, seconds, mesos, meso_seconds, local=None):
         run = {"date": date.fromtimestamp(r["wall"]).isoformat(),
                "started": time.strftime("%Y-%m-%dT%H:%M", time.localtime(r["wall"])),
-               "map": r["map"], "map_read": r["map_read"], "class": r["job"],
+               "map": self._maps_label(r["maps"]) if len(r.get("maps", ())) > 1 else r["map"],
+               "map_read": self._maps_label(r["reads"]) if len(r.get("reads", ())) > 1 else r["map_read"],
+               "class": r["job"],
                "level_start": r["level_start"], "level_end": r["level"], "party": r["party"],
                "exp": r["exp"], "seconds": round(seconds, 1), "mesos": mesos,
                "mesos_seconds": round(meso_seconds, 1), "version": VERSION}
@@ -4201,6 +4370,10 @@ class AutoLog:
             local["party_unread"] = True
             if run["seal"] != "estimated":
                 run["seal"] = "party_unread"
+        if r.get("no_reset"):                                # (the same: No Reset was on, maybe across maps)
+            local["no_reset"] = True
+            if run["seal"] not in ("estimated", "party_unread"):
+                run["seal"] = "no_reset"
         run.update(local)                                    # (kept on this PC only: not sealed, never sent)
         self._change(lambda: self.runs.append(run))
         return run
@@ -4210,7 +4383,8 @@ class AutoLog:
         the maps in the log, and any names in `also`, e.g. the map you were just on)."""
         name = self.aliases.get(name, name)
         best, score = name, 0.0
-        for known in {e["map"] for e in self.entries} | set(self.aliases.values()) | {n for n in also if n}:
+        known_maps = {e["map"] for e in self.entries if MAPS_JOIN not in e["map"]}     # (not "Map A/Map B" lines)
+        for known in known_maps | set(self.aliases.values()) | {n for n in also if n}:
             if _numbers(known) == _numbers(name):
                 s = SequenceMatcher(None, known.lower(), name.lower()).ratio()
                 if s > score:
@@ -4474,6 +4648,8 @@ class App:
         self.started, self.cpu0 = time.monotonic(), time.process_time()
         self.recent, self.health = Recent(40, self.started), Health()      # for bug reports
         self.autolog = AutoLog(self.cfg["gap_seconds"])
+        self.session.no_reset = self.cfg["no_reset"]         # (remembered from last time)
+        self.autolog.set_no_reset(self.cfg["no_reset"])
         self.map_name = None
         self.potion_bar = potion_bar.NOT_SEEN    # what the potion bar showed at the last look: a potion_bar.PotionLook
         self._forget_report_screen()             # (a bug report's game picture left from last time)
@@ -4521,6 +4697,7 @@ class App:
         self._dpi = (PLATFORM.screen_dpi(pos[0] + 40, pos[1] + 15) if pos else None) or root.winfo_fpixels("1i")
         self._apply_ui_scale()
         self.hotkey_note = None
+        self.no_reset_note = None                       # (what switching No Reset means, shown for a few seconds)
         self.hotkeys = PLATFORM.create_hotkeys(lambda action: self.q.put(("hotkey", action)))
         self.hotkeys.set(self.cfg["hotkeys"], self.cfg["hotkeys_on"])
         self.compact = False
@@ -4579,7 +4756,8 @@ class App:
         self.theme = Theme(self.root, self._px_per_pt * 0.75, ASSETS / "fonts", self._own_fonts, PLATFORM.font)
         callbacks = dict(settings=self.open_settings, compact=lambda: self.set_compact(not self.compact),
                          log=self.toggle_log, start=self.toggle, reset=self.reset, logging=self._logging_clicked,
-                         best=self.open_best_maps, menu=self._open_menu, details=self._details_changed)
+                         best=self.open_best_maps, menu=self._open_menu, details=self._details_changed,
+                         no_reset=self.set_no_reset)
         self.view = self.main = MainView(self.root, self.theme, callbacks, details=bool(self.cfg.get("details")))
         self.view.grid(row=0, column=0, sticky="n")
         if self.compact:
@@ -4588,6 +4766,7 @@ class App:
         self.view.log_btn.set(kind="secondary" if self.log_open else "ghost")
         self.view.show(message=self.status.get())
         self._show_skip_log()
+        self._show_no_reset()
 
     def _style_frame(self):
         """The title bar in the overlay's colours. (Windows resets it when the frame changes, e.g. when the
@@ -5155,6 +5334,11 @@ class App:
                command=lambda: gap_by(5), bg=BG).pack(side="left")
         tk.Label(gap_step, text="s", bg=BG, fg=DIM, font=th.font("regular", 11)).pack(side="left", padx=(px(6), 0))
         tk.Label(body, text="Pausing also restarts the 5-minute log timer.", **dim).pack(anchor="w", pady=(px(5), 0))
+        no_reset = self._no_reset_var = tk.BooleanVar(value=bool(self.cfg["no_reset"]))
+        self._switch(body, "No Reset: keep the numbers across maps", no_reset).pack(anchor="w", pady=(px(10), 0))
+        tk.Label(body, text="For farming that moves between maps. Runs made with it on stay on this PC (they're "
+                            "not sent to the best-maps site).", wraplength=wrap, justify="left", **dim).pack(
+            anchor="w", pady=(px(4), 0))
 
         self._section(body, "Window")
         transparency = tk.IntVar(value=int(self.cfg["transparency"]))
@@ -5260,6 +5444,8 @@ class App:
             self.cfg["topmost"] = bool(topmost.get())
             self.cfg["check_updates"] = bool(updates.get())
             self.cfg["potions_on"] = bool(potions_on.get())
+            if bool(no_reset.get()) != self.cfg["no_reset"]:
+                self.set_no_reset(no_reset.get())
             if bool(sharing.get()) != bool(self.cfg.get("share_runs")):
                 self.cfg["share_runs"] = bool(sharing.get())
                 self.share_runs()
@@ -5274,7 +5460,7 @@ class App:
                 self.root.after(60, self._reopen_settings)        # (drawn again at the new size)
             save_config(self.cfg)
 
-        for var in (gap, transparency, topmost, updates, sharing, health_on, size, potions_on):
+        for var in (gap, transparency, topmost, updates, sharing, health_on, size, potions_on, no_reset):
             var.trace_add("write", apply)
         self._hotkey_settings(body)
         buttons = tk.Frame(body, bg=BG)
@@ -5512,8 +5698,8 @@ class App:
         while not self.stop_evt.is_set():
             try:
                 with mss.mss() as sct:
-                    screen = ScreenCapture(sct)
-                    window = PLATFORM.window_capture()  # (a window this OS can read directly: see capture.WindowCapture)
+                    capture = (WindowCapture(sct, PLATFORM, lambda: self.reader.own_rect)
+                               if PLATFORM.captures_window_alone else ScreenCapture(sct))
                     opened = time.monotonic()
                     # (opened again every SCREEN_LIST_SECONDS: mss keeps the list of screens it first saw, so a monitor
                     # plugged in or out, or a new resolution, would leave the game "off screen" until a restart)
@@ -5549,7 +5735,9 @@ class App:
         sharing question comes after."""
         seen = self.cfg.get("seen_version", "")
         newer = not seen or version_key(VERSION) > version_key(seen)
-        if newer:
+        # (a Mac test build keeps nothing: "0.9.16-mactest.1" sorts above "0.9.16-beta", so the release would skip
+        # its What's new)
+        if newer and TEST_BUILD_MARK not in VERSION:
             self.cfg["seen_version"] = VERSION                 # (first, so a crash in a window can't repeat it)
             save_config(self.cfg)
         if self._fresh and newer:
@@ -5733,7 +5921,7 @@ class App:
                 game = (rect[2], rect[3], any(rect[2] == w and rect[3] == h for w, h, _ in self._health_monitors), gh)
             self.healthlog.look(healthlog.kind_of(r), r.percent_only, r.tries, r.ms,
                                 (now - last) if last is not None and self.tracker.running else 0.0, game, r.shadow,
-                                r.ui, r.layout, r.shadows, r.shadow_why)
+                                r.ui, r.layout, r.shadows, r.shadow_why, r.filter)
         except Exception as e:                      # (counting must never keep a reading from being handled)
             log_error("counting a look for the health report", e)
 
@@ -5964,6 +6152,7 @@ class App:
                 self.level_wait, self.pct_note = False, ""
                 self._char_print = self.reader.name_print if self.reader.name_print is not None else self._char_print
             waiting = r.percent_only and self.pct_note.startswith(PCT_WAIT_NOTES)    # (a %-only bar waiting for its level isn't misread)
+            waiting = waiting or note.startswith("calibrating")    # (nor is a bar too near 0% to learn the level's EXP from)
             self.rejected = 0 if ok or self.level_wait or waiting else self.rejected + 1
             if self.rejected >= 10:                 # keeps not adding up: find the EXP bar again
                 self.reader.box, self.rejected = None, 0
@@ -6087,6 +6276,8 @@ class App:
             return f"Level up! You're now Lv {self.level}." if self.level else "Level up!"
         if self.hotkey_note and time.monotonic() - self.hotkey_note[1] < 4:
             return self.hotkey_note[0]
+        if self.no_reset_note and time.monotonic() - self.no_reset_note[1] < 8:
+            return self.no_reset_note[0]
         if self.died_at and time.monotonic() - self.died_at < 30 and t.last_loss:
             return f"You died and lost {t.last_loss:.1f}% EXP. That isn't taken off your EXP/hr."
         if self.rejected >= 5:
@@ -6182,6 +6373,10 @@ class App:
             return "tracking", "Level up!"
         if sess.waiting:
             return "paused", "Paused"
+        if self.cfg["no_reset"]:                     # (instead of the level: it's in the big card anyway)
+            if t.running:
+                return "tracking", "Tracking \u00b7 No Reset"
+            return ("paused", "Paused \u00b7 No Reset") if t.elapsed() > 0 else ("ready", "Ready \u00b7 No Reset")
         if t.running:
             return "tracking", f"Tracking \u00b7 Lv {self.level}" if self.level else "Tracking"
         return ("paused", "Paused") if t.elapsed() > 0 else ("ready", "Ready")
@@ -6300,6 +6495,9 @@ class App:
         elif action == "skip":
             self.toggle_skip_log()
             done = "not logging this run" if self.skip_log else "logging this run again"
+        elif action == "no_reset":
+            self.toggle_no_reset()
+            done = "No Reset on" if self.cfg["no_reset"] else "No Reset off"
         else:
             self.set_compact(not self.compact)
             return
@@ -6342,6 +6540,31 @@ class App:
         self.cfg.pop("mesos_box", None)
         save_config(self.cfg)
         self.status.set("Reset. Looking for the map name, inventory and party list again...")
+
+    def toggle_no_reset(self):
+        self.set_no_reset(not self.cfg["no_reset"])
+
+    def set_no_reset(self, on):
+        """No Reset (main window switch, Settings, hotkey): map changes and AFK never start new numbers, and the
+        runs made meanwhile stay on this PC. Remembered after a restart."""
+        on = bool(on)
+        changed = on != self.cfg["no_reset"]
+        self.cfg["no_reset"] = self.session.no_reset = on
+        self.autolog.set_no_reset(on)
+        save_config(self.cfg)
+        self._show_no_reset()
+        if changed:
+            self.recent.add("No Reset on" if on else "No Reset off")
+            self.no_reset_note = (NO_RESET_ON if on else NO_RESET_OFF, time.monotonic())
+            self.status.set(self.no_reset_note[0])
+
+    def _show_no_reset(self):
+        on = bool(self.cfg["no_reset"])
+        self.view.no_reset.set(on)
+        self.view.show(no_reset=on)
+        var = getattr(self, "_no_reset_var", None)          # (Settings open: its switch follows)
+        if var is not None and self.settings_win and self.settings_win.winfo_exists() and bool(var.get()) != on:
+            var.set(on)
 
     def toggle_skip_log(self):
         self.skip_log = not self.skip_log

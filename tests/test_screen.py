@@ -203,7 +203,8 @@ for name, info in sorted(PARTS["inventory"].items()):
     blank = m.Reading(*([None] * len(m.Reading._fields)))
     scene = np.full((wh, ww, 3), 25, np.uint8)
     scene[:h, :w] = inv
-    scene[:h, w + 10:2 * w + 10] = inv                              # the storage's box and yours
+    oo = round(m.STORAGE_SPACING * bw)                              # (the two panels' boxes sit at this spacing)
+    scene[:h, oo:oo + w] = inv                                      # the storage's box and yours
     storage = money_window_picture("storage", ww, scene, scale=gh / 28, at=(2 * w + 40, int(0.1 * h)))
     clock = [1000.0]
     real_monotonic = m.time.monotonic
@@ -212,7 +213,7 @@ for name, info in sorted(PARTS["inventory"].items()):
         reader.next_scan = 0.0
         r = reader._read_extras(FakeScreen(storage), (0, 0, ww, wh), blank)
         check(f"in a storage window the right-hand box is read as yours, {size}",
-              r.window == "storage" and reader.mesos_box == (w + 10 + bx, by, bw, bh) and not reader.two_boxes)
+              r.window == "storage" and reader.mesos_box == (oo + bx, by, bw, bh) and not reader.two_boxes)
         check(f"the status line says which window is open, {size}", "Storage window open" in (r.note or ""))
         check(f"a window's box is not remembered as the inventory's, {size}", r.mesos_at is None)
         check(f"it looks again within {m.WINDOW_SCAN_SECONDS} s while the window is open, {size}",
@@ -228,6 +229,87 @@ for name, info in sorted(PARTS["inventory"].items()):
     finally:
         m.time.monotonic = real_monotonic
 
+# ---- a storage window's two mesos boxes sit at one fixed spacing: only such a pair is read, the right-hand one is yours.
+# (F15: a hand cursor over the coin of yours left the stored box as the "right-hand" one: 0 mesos read for 10,569)
+real = {"1920": [(730, 765, 180, 19), (1022, 765, 181, 19)], "2560": [(973, 1020, 241, 26), (1363, 1020, 241, 26)],
+        "5K": [(1785, 1947, 482, 51), (2564, 1947, 483, 51)]}                    # (as measured on real recordings)
+check("storage pair: the two boxes at the spacing are the stored mesos and yours, at 1920, 2560 and 5K",
+      all(m.storage_pair(b) == (b[0], b[1]) and m.storage_pair(b[::-1]) == (b[0], b[1]) for b in real.values()))
+other = {"1920": (36, 674, 200, 19), "2560": (47, 990, 268, 26), "5K": (154, 1939, 535, 52)}       # a third, unrelated box far left
+check("storage pair: a third box elsewhere changes nothing",
+      all(m.storage_pair([other[k]] + real[k]) == (real[k][0], real[k][1]) for k in real))
+check("storage pair: two boxes that are not at the spacing (the stored one and an unrelated one) are no pair",
+      all(m.storage_pair([other[k], real[k][0]]) is None and m.storage_pair([other[k], real[k][1]]) is None for k in real))
+check("storage pair: one box, none, boxes of different widths or heights are no pair",
+      m.storage_pair([real["2560"][0]]) is None and m.storage_pair([]) is None
+      and m.storage_pair([real["2560"][0], (1363, 1020, 300, 26)]) is None and m.storage_pair([real["2560"][0], (1363, 1060, 241, 26)]) is None)
+check("storage pair: boxes in a chain of the spacing are ambiguous: no pair",
+      m.storage_pair([(0, 0, 100, 10), (162, 0, 100, 10), (324, 0, 100, 10)]) is None)
+
+for name, info in sorted(PARTS["inventory"].items()):
+    inv, gh, (bx, by, bw, bh) = cv2.imread(str(FRAMES / name)), info["gh"], info["box"]
+    h, w = inv.shape[:2]
+    size = f"EXP digits {gh:.0f} px"
+    oo = round(m.STORAGE_SPACING * bw)
+    ww, wh = 3 * oo + w + 40 + int(1100 * gh / 28) + 40, int(h * 1.3)
+    blank = m.Reading(*([None] * len(m.Reading._fields)))
+
+    def storage_scene(copies):
+        scene = np.full((wh, ww, 3), 25, np.uint8)
+        for x in copies:
+            scene[:h, x:x + w] = inv
+        return money_window_picture("storage", ww, scene, scale=gh / 28, at=(3 * oo + w + 40, int(0.1 * h)))
+
+    for title, copies, want in (("an unrelated box, the stored mesos and yours", (0, 2 * oo, 3 * oo), 3 * oo + bx),
+                                ("only the stored box and yours", (2 * oo, 3 * oo), 3 * oo + bx),
+                                ("the coin of yours covered: an unrelated box and the stored mesos only", (0, 2 * oo), None),
+                                ("the stored box alone", (2 * oo,), None)):
+        reader = m.ScreenReader(m.DigitTemplates.load())
+        reader.gh = gh
+        reader.mesos_digits = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz")
+        reader.next_scan = 0.0
+        r = reader._read_extras(FakeScreen(storage_scene(copies)), (0, 0, ww, wh), blank)
+        check(f"in a storage window with {title}, "
+              + ("yours is read" if want else "nothing is read (never the stored mesos)") + f", {size}",
+              r.window == "storage" and (reader.mesos_box == (want, by, bw, bh) if want else reader.mesos_box is None and r.mesos is None))
+        if want is None:
+            check(f"...and the outline search stays off while whose box is whose can't be told, {size}", reader.two_boxes)
+
+# ---- a hidden leading digit is never read as a shorter number (22286 as 2286): the cell that ends the number must be a blank
+for name, info in sorted(PARTS["inventory"].items()):
+    inv, gh, field = cv2.imread(str(FRAMES / name)), info["gh"], tuple(info["box"])
+    bx, by, bw, bh = field
+    size = f"EXP digits {gh:.0f} px"
+    full, short = info["mesos"], int(str(info["mesos"])[1:])                      # 18047 and 8047
+    cx = m._mesos_spot(field, len(str(full)) - 1)                                  # the leading digit's centre
+    hw = 0.2 * bh
+
+    def covered(kind):
+        im = inv.copy()
+        if kind == "blank":                                                        # the digit is not there: a blank cell
+            im[by + 2:by + bh - 2, int(cx - 1.2 * hw):int(cx + 1.2 * hw)] = 255
+        elif kind == "bar":                                                        # a sprite's edge across the digit
+            cv2.line(im, (int(cx - hw), by + bh - 3), (int(cx + hw), by + 3), (60, 60, 60), max(1, bh // 8))
+        elif kind == "corner":
+            im[by + 2:by + int(0.5 * bh), int(cx - hw):int(cx + hw)] = 255
+        elif kind == "half":                                                       # the left half of the digit gone
+            im[by + 2:by + bh - 2, int(cx - hw):int(cx)] = 255
+        return im
+    tpl = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz").templates()
+    check(f"a blank cell ends the number as before, {size}", (m.read_mesos_positions(covered("blank"), field, tpl) or [None])[0] == short)
+    for kind in ("bar", "corner"):
+        got = m.read_mesos_positions(covered(kind), field, tpl)
+        check(f"a covered leading digit ({kind}) is never read as the shorter number, {size}", got is None or got[0] == full)
+    # ...and a number that just lost a digit has to end in a nearly blank cell (spending does that, a half-hidden digit too)
+    for kind, want in (("blank", short), ("half", None)):
+        reader = m.ScreenReader(m.DigitTemplates.load())
+        reader.gh = gh
+        reader.mesos_digits = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz")
+        reader.mesos_count = len(str(full))
+        got = reader._read_mesos(FakeScreen(covered(kind)), bx, by, bw, bh)[0]
+        check(f"after a {len(str(full))}-digit number, the {kind} cell: " + ("the shorter number is read at once" if want else "never the shorter number")
+              + f", {size}", got == want if want else got in (None, full))
+
 # ---- the trade window's chat panel can cover the coin: the box is found by its size
 for name, info in sorted(PARTS["inventory"].items()):
     inv, gh, (bx, by, bw, bh) = cv2.imread(str(FRAMES / name)), info["gh"], info["box"]
@@ -241,6 +323,44 @@ for name, info in sorted(PARTS["inventory"].items()):
     found = m.find_trade_mesos_box(cut, gh)
     check(f"a trade window's covered mesos box is found and the offer boxes aren't, EXP digits {gh:.0f} px",
           found is not None and found[0] + found[2] == bx + bw and found[1] == by)
+
+# ---- the mesos digits are learned (into the data folder, used on Default screens too) only while the filter is sure to be off
+for name, info in sorted(PARTS["inventory"].items()):
+    inv, gh, (bx, by, bw, bh) = cv2.imread(str(FRAMES / name)), info["gh"], info["box"]
+    h, w = inv.shape[:2]
+    scene = np.full((h + 40, w + 40, 3), 25, np.uint8)
+    scene[:h, :w] = inv
+    size = f"EXP digits {gh:.0f} px"
+    learned_for = {}
+    for state in ("off", "no_effect", "on", "unknown"):
+        reader = m.ScreenReader(m.DigitTemplates.load())
+        reader.gh = gh
+        reader._filter.state = state
+        digits = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz")
+        digits.examples = {k: v[:-1] for k, v in digits.examples.items()}            # one short of full: room to learn
+        reader.mesos_digits = digits
+        got = reader._read_mesos(FakeScreen(scene), bx, by, bw, bh)[0]
+        learned_for[state] = sum(len(v) for v in digits.examples.values()) - 10 * (m.MesosDigits.PER_DIGIT - 1)
+        check(f"the mesos read does not depend on the filter state ({state}), {size}", got == info["mesos"])
+    check(f"mesos digits are learned while the filter is off or has no effect, {size}", learned_for["off"] > 0 and learned_for["no_effect"] > 0)
+    check(f"...and not while it is on or not known yet, {size}", learned_for["on"] == 0 and learned_for["unknown"] == 0)
+    # still learning the font (a digit missing): Tesseract + the EXP digits agree, the same rule
+    for state, want in (("off", True), ("on", False), ("unknown", False)):
+        reader = m.ScreenReader(m.DigitTemplates.load())
+        reader.gh = gh
+        reader._filter.state = state
+        digits = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz")
+        digits.examples.pop("7", None)
+        before = {k: len(v) for k, v in digits.examples.items()}
+        reader.mesos_digits = digits
+        real_tess = m.tesseract_mesos
+        m.tesseract_mesos = lambda lay, value=info["mesos"]: (value, 6)
+        try:
+            reader._read_mesos(FakeScreen(scene), bx, by, bw, bh)
+        finally:
+            m.tesseract_mesos = real_tess
+        grew = any(len(v) > before.get(k, 0) for k, v in digits.examples.items())
+        check(f"while the mesos font is still being learned, digits are learned only when the filter is off ({state}), {size}", grew == want)
 
 # ---- the potion bar: drawn with simple icons and the game's count glyphs, at several sizes and both UI sizes
 import potions  # noqa: E402
@@ -659,6 +779,43 @@ check("party v3 through the reader: a held count goes to the shadow as unclear (
       _rdr._party_v3(np.full((768, 1366, 3), 60, np.uint8), None, 768) == (None, "unclear")
       and _rdr._party_last.why == "held" and _rdr._party_last.count == 4)
 
+_seen_flags = []
+_real_v3 = party_v3.read_party_v3
+party_v3.read_party_v3 = lambda img, hint=None, last=None, hsv=None, filtered=False: (_seen_flags.append(filtered), _real_v3(img, hint, last, hsv, filtered))[1]
+try:
+    for _on in (True, False):
+        _rdr._filter.state = "on" if _on else "off"
+        _rdr._party_v3(_win, cv2.cvtColor(_win, cv2.COLOR_BGR2HSV), 768)
+finally:
+    party_v3.read_party_v3 = _real_v3
+check("party v3 through the reader: told the filter is on only when ScreenReader.filtered", _seen_flags == [True, False])
+
+# F12: while the filter is still "unknown" (the first ~6-12 s, or after a size change) a filtered list reads as "no list" the Default
+# way = alone (WRONG on the exam: 3 as 1). "No list" is then looked at the filtered way too: a list found there is unclear, never alone.
+_PL = party_v3.PartyLook
+def _stub_v3(default, filtered, calls):
+    return lambda img, hint=None, last=None, hsv=None, filtered_=False: (calls.append(filtered_), filtered if filtered_ else default)[1]
+_solo, _three, _unc = _PL(1, "ok", None, None, 0), _PL(3, "ok", 1.875, (1, 1, 1, 1), 0), _PL(None, "unclear", 1.875, (1, 1, 1, 1), 0)
+_hsv = cv2.cvtColor(_win, cv2.COLOR_BGR2HSV)
+_cases = {}
+try:
+    for _name, _state, _def, _flt in (("unknown, list drawn filtered", "unknown", _solo, _three), ("unknown, list unclear filtered", "unknown", _solo, _unc),
+                                      ("unknown, really alone", "unknown", _solo, _solo), ("unknown, Default list read", "unknown", _three, _solo),
+                                      ("off, list drawn filtered", "off", _solo, _three), ("on", "on", _three, _three), ("no_effect", "no_effect", _solo, _three)):
+        _calls = []
+        party_v3.read_party_v3 = _stub_v3(_def, _flt, _calls)
+        _rdr._filter.state, _rdr._party_last = _state, None
+        _cases[_name] = (_rdr._party_v3(_win, _hsv, 768), _calls)
+finally:
+    party_v3.read_party_v3 = _real_v3
+check("party v3 while the filter is unknown: a list that only shows the filtered way is unclear (never alone)",
+      _cases["unknown, list drawn filtered"] == ((None, "unclear"), [False, True])
+      and _cases["unknown, list unclear filtered"] == ((None, "unclear"), [False, True]))
+check("party v3 while the filter is unknown: really alone stays 1; a list read the Default way is not looked at twice",
+      _cases["unknown, really alone"] == ((1, "ok"), [False, True]) and _cases["unknown, Default list read"] == ((3, "ok"), [False]))
+check("party v3: the second (filtered) look is only for 'unknown' (off, on and no_effect read once)",
+      _cases["off, list drawn filtered"] == ((1, "ok"), [False]) and _cases["on"] == ((3, "ok"), [True]) and _cases["no_effect"] == ((1, "ok"), [False]))
+
 # ---- party v3 decides (0.9.15, Q10); today's reader is the fallback
 PL = party_v3.PartyLook
 for look, want, why in ((None, (3, None), "v3 didn't run: today's count"),
@@ -689,7 +846,7 @@ def _party_scan(look, on=True):
     real, tess = party_v3.read_party_v3, (m.TESS, m.tesseract_ok)
     m.TESS, m.tesseract_ok = None, False
     if look is not None:
-        party_v3.read_party_v3 = look if callable(look) else (lambda img, hint=None, last=None, hsv=None: look)
+        party_v3.read_party_v3 = look if callable(look) else (lambda img, hint=None, last=None, hsv=None, filtered=False: look)
     try:
         return rd, rd.read(FakeScreen(_full))
     finally:
@@ -839,6 +996,54 @@ for label, damage in (
         ("the mouse cursor over a tile", lambda p, b: cv2.circle(p, (b[0] + b[2] // 4, b[1] + b[3] // 2), max(2, b[3] // 3), (255, 255, 255), -1))):
     wrong = over_the_tile(damage)
     check(f"{label}: right or unknown, never a wrong level ({wrong or 'none wrong'})", not wrong)
+# ---- "Default Ratio (Filter Applied)": the game sharpens the whole picture; with the filter known to be on the digits are drawn sharpened
+def filtered_pic(pic, scale, sigma=level_ocr.SHARP_SIGMA, amount=level_ocr.SHARP_AMOUNT):
+    """The picture the way the filter draws it: an unsharp mask on every channel, the blur growing with the UI scale."""
+    f = pic.astype(np.float32)
+    return np.clip(f + amount * (f - cv2.GaussianBlur(f, (0, 0), sigma * scale, borderType=cv2.BORDER_REPLICATE)), 0, 255).astype(np.uint8)
+
+
+filt_wrong, filt_unknown, plain_wrong = [], [], []
+for scale in (1.40625, 1.5625, 1.875, 2.8125):
+    for level in (10, 25, 36, 47, 58, 69, 80, 91, 100, 234):
+        pic, x0, cy = badge_scene(level, 7 * scale, scale=scale)
+        sharp = filtered_pic(pic, scale)
+        got = level_ocr.read_level(sharp, x0, cy, 7 * scale, [scale], {}, True)
+        if got is None:
+            filt_unknown.append((scale, level))
+        elif got != level:
+            filt_wrong.append((scale, level, got))
+        got = level_ocr.read_level(sharp, x0, cy, 7 * scale, [scale], {})        # (the Default reading of a filtered picture)
+        if got is not None and got != level:
+            plain_wrong.append((scale, level, got))
+check(f"filtered: every digit is read at 1.41, 1.56, 1.88 and 2.81 (wrong {filt_wrong or 'none'}, unknown {filt_unknown or 'none'})",
+      not filt_wrong and not filt_unknown)
+check(f"...the Default reading of a filtered picture is unknown or right, never wrong ({plain_wrong or 'none wrong'})", not plain_wrong)
+mix = []
+for scale in (1.40625, 1.5625, 1.875, 2.8125, 3.75):          # (filtered reading of a Default picture, and of a filter that sharpens a bit differently)
+    for level in (10, 25, 36, 47, 58, 69, 80, 91, 100, 234):
+        pic, x0, cy = badge_scene(level, 7 * scale, scale=scale)
+        for what, seen in (("Default", pic), ("softer", filtered_pic(pic, scale, 0.4, 0.9)), ("harder", filtered_pic(pic, scale, 0.8, 1.5)),
+                           ("wider", filtered_pic(pic, scale, 1.2, 1.1))):
+            got = level_ocr.read_level(seen, x0, cy, 7 * scale, [scale], {}, True)
+            if got is not None and got != level:
+                mix.append((what, scale, level, got))
+check(f"filtered reading of a Default picture or of a filter that sharpens differently: right or unknown, never wrong ({mix or 'none wrong'})", not mix)
+sharp_wrong = []
+for scale in (1.40625, 1.875):
+    for label, damage in (
+            ("window", lambda p, b: cv2.rectangle(p, (b[0] + b[2] // 2, b[1]), (b[0] + b[2], b[1] + b[3]), (40, 40, 40), -1)),
+            ("beside", lambda p, b: cv2.rectangle(p, (b[0] + b[2] + 1, b[1]), (b[0] + b[2] + 6, b[1] + b[3]), (255, 255, 255), -1)),
+            ("cursor", lambda p, b: cv2.circle(p, (b[0] + b[2] // 4, b[1] + b[3] // 2), max(2, b[3] // 3), (255, 255, 255), -1)),
+            ("grain", lambda p, b: np.clip(p + np.random.default_rng(3).normal(0, 60, p.shape), 0, 255).astype(np.uint8))):
+        for level in (1, 7, 32, 58, 99, 100, 250):
+            pic, x0, cy = badge_scene(level, 7 * scale, scale=scale)
+            box = (int(x0 - 53.6 * 7 * scale), int(cy + 0.2 * 7 * scale), int((12 * len(str(level)) - 1) * scale), int(13 * scale))
+            got = level_ocr.read_level(filtered_pic(damage(pic, box), scale), x0, cy, 7 * scale, [scale], {}, True)
+            if got is not None and got != level:
+                sharp_wrong.append((label, scale, level, got))
+check(f"filtered: a window, a white mark beside the tiles, the cursor or heavy grain over the badge: never a wrong level ({sharp_wrong or 'none wrong'})",
+      not sharp_wrong)
 # an orange square near some other white marks isn't the badge: its "LV." has to be as wide as the game's
 short, good = badge_scene(17, 14, label_width=1.3), badge_scene(17, 14)
 check("a badge whose LV mark is too short is refused (other orange icons have short marks near them)",
@@ -914,6 +1119,17 @@ class CountReads:
         return self.real(*args, **kw)
 
 
+class Spy(CountReads):
+    """CountReads that also keeps the last argument of every badge reading: the filter flag."""
+    def __init__(self):
+        super().__init__()
+        self.flags = []
+
+    def __call__(self, *args, **kw):
+        self.flags.append(args[-1])
+        return super().__call__(*args, **kw)
+
+
 real_monotonic = m.time.monotonic
 clock = [100.0]
 m.time.monotonic = lambda: clock[0]
@@ -950,6 +1166,19 @@ try:
         r._read_level(screen, rect)
         check("this window covering the badge: nothing is read, and it says so",
               says.runs == 0 and r.level is None and "covering" in r.level_look["why"] and r.badge_covered)
+
+    # the reader hands the filter's state to the badge reading, and only "on" counts
+    real_filtered, flags = m.ScreenReader.filtered, []
+    for on in (True, False):
+        m.ScreenReader.filtered = property(lambda self, on=on: on)
+        try:
+            with Spy() as spy:
+                r, screen, rect = level_reader(32)
+                r._read_level(screen, rect)
+            flags += spy.flags
+        finally:
+            m.ScreenReader.filtered = real_filtered
+    check(f"the reader reads the badge as filtered exactly when its filter state is on ({flags})", flags == [True, False])
 
     # the character's name: a print is taken every few seconds, even without Tesseract, and kept only in memory
     def named(name):
@@ -1358,6 +1587,19 @@ got = kind_of_look(setup=lambda r: (setattr(r, "_read_potion_bar", lambda *a, **
 check("health: a potion bar look with a count it couldn't read is noted as not read", got.tries == (("potions", False),))
 check("health: ...and a seen bar gives the look its layout and UI size", got.layout == "keyboard")
 
+# F09: the potion bar is read as filtered exactly when the reader's filter state is on (Default Ratio (Filter Applied))
+real_filtered, real_read_potions, flags = m.ScreenReader.filtered, potion_bar.read_potions, []
+potion_bar.read_potions = lambda *a, **k: (flags.append(k.get("filtered")), potion_bar.NOT_SEEN)[1]
+try:
+    for on in (True, False):
+        m.ScreenReader.filtered = property(lambda self, on=on: on)
+        r = part_reader()
+        r._read_potion_bar(FakeScreen(np.zeros((1080, 1920, 3), np.uint8)), (0, 0, 1920, 1080), [])
+finally:
+    m.ScreenReader.filtered, potion_bar.read_potions = real_filtered, real_read_potions
+check(f"the reader reads the potion bar as filtered exactly when its filter state is on ({flags})", flags == [True, False])
+
+
 # A04 audit: every way out of a look sets exp_kind itself, and the looks add up in the health record
 r = part_reader()
 r._game_rect = lambda: None
@@ -1461,6 +1703,98 @@ check("a window capture without a compositing desktop still says this app's wind
 check("the bare fake screen is wrapped as a screen copy", isinstance(m.as_capture(FakeScreen(frame)), ScreenCapture)
       and isinstance(m.as_capture(SeeThrough(None)), Capture))
 
+# ---- window capture (macOS): the game window pictured alone, so what's on top of the game on screen doesn't matter
+from capture import WindowCapture  # noqa: E402
+
+
+class OneWindow:
+    """Stands in for PLATFORM: one game window (number 7) at rect, pictured alone as `alone` (None: that fails)."""
+    captures_window_alone = True
+
+    def __init__(self, rect, alone):
+        self.rect, self.alone, self.asked = rect, alone, []
+
+    def find_game_window(self):
+        return 7
+
+    def window_exists(self, number):
+        return number == 7
+
+    def client_rect(self, number):
+        return self.rect
+
+    def missing_permission(self):
+        return None
+
+    def capture_window(self, number, left, top, width, height):
+        self.asked.append((number, left, top, width, height))
+        if self.alone is None:
+            return None
+        x, y = left - self.rect[0], top - self.rect[1]
+        part = self.alone[y:y + height, x:x + width]
+        return np.dstack([part, np.full(part.shape[:2], 255, np.uint8)])
+
+
+alone = np.full((720, 1280, 3), 25, np.uint8)
+alone[720 - frame.shape[0] - 6:714, 400:400 + frame.shape[1]] = frame
+own = (50 + 380, 30 + 720 - 40, 200, 40)                 # this app's window, on top of the EXP bar
+on_screen = np.full((800, 1400, 3), 60, np.uint8)        # the game at (50, 30), this app's window over it
+on_screen[30:750, 50:1330] = alone
+on_screen[own[1]:own[1] + own[3], own[0]:own[0] + own[2]] = 200
+
+
+def read_through(platform, screen, looks=3):
+    real_platform, real_ok = m.PLATFORM, m.tesseract_ok
+    m.PLATFORM, m.tesseract_ok = platform, False
+    try:
+        r = m.ScreenReader(m.DigitTemplates.load())
+        r.own_rect = own
+        cap = WindowCapture(FakeScreen(screen), platform, lambda: r.own_rect)
+        return [r.read(cap) for _ in range(looks)], r
+    finally:
+        m.PLATFORM, m.tesseract_ok = real_platform, real_ok
+
+
+platform = OneWindow((50, 30, 1280, 720), alone)
+got, r = read_through(platform, on_screen)
+check("pictured alone, the game's EXP bar is read with this app's window on top of it",
+      all(x.confident and x.candidates == [(68601, 71.68)] for x in got) and r.diagnostics()["capture"] == "window")
+check(f"...pictured once per look, the whole window, every part cut from that ({len(platform.asked)} pictures in 3 looks)",
+      platform.asked == [(7, 50, 30, 1280, 720)] * 3)
+
+seen_by_self = on_screen.copy()                            # this app's window happens to show an EXP bar
+seen_by_self[own[1] + 6:own[1] + 6 + frame.shape[0], own[0] + 20:own[0] + 20 + frame.shape[1]] = frame
+seen_by_self[30 + 720 - frame.shape[0] - 6:744, 450:450 + frame.shape[1]] = 25
+got, r = read_through(OneWindow((50, 30, 1280, 720), None), seen_by_self)
+check("if picturing the window alone fails, the screen is used, still without ever reading this app's own window",
+      not any(x.candidates for x in got) and r.diagnostics()["capture"] == "screen")
+got, _ = read_through(OneWindow((50, 30, 1280, 720), None), on_screen)
+check("...and it says when this app's window is covering the bar, as a screen copy does",
+      not any(x.confident for x in got) and "covering" in got[-1].where)
+
+class NoPermission(OneWindow):
+    """Nexon's Mac app is found by its program name, which macOS shows without the Screen Recording permission."""
+    def missing_permission(self):
+        return "Can't see other windows. Allow it in Screen Recording."
+
+
+got, _ = read_through(NoPermission((50, 30, 1280, 720), None), on_screen, looks=1)
+check("a game window found without the Screen Recording permission says to allow it (not 'is something covering it?')",
+      got[0].where == "Can't see other windows. Allow it in Screen Recording." and not got[0].confident)
+
+cap = WindowCapture(FakeScreen(on_screen), OneWindow((50, 30, 1280, 720), alone), lambda: own)
+cap.begin_look()
+cap.window_at(7, (50, 30, 1280, 720))
+inside, outside = cap.grab(60, 40, 100, 50), cap.grab(own[0] - 10, own[1] - 10, 50, 60)    # (past the window's bottom)
+check("a part inside the window comes from its picture; one reaching outside it is a screen copy with this app blacked out",
+      inside[1:] == (60, 40) and inside[0].shape == (50, 100, 3) and (inside[0] == alone[10:60, 10:110]).all()
+      and outside[0].shape == (60, 50, 3) and outside[0][10:50, 10:].max() == 0 and outside[0][:10].min() > 0
+      and outside[0][50:].min() > 0)
+cap.end_look()
+cap.begin_look()
+check("...and the next look starts as a screen copy until the window is pictured again",
+      not cap.sees_through_windows and cap.grab(60, 40, 100, 50)[0].shape == (50, 100, 3))
+
 game = cv2.imread(str(Path(__file__).resolve().parent.parent / "docs" / "screenshot-game.jpg"))
 got = level_ocr.read_level(game, 1052, 1044, 11.0, [s for _, s in ui_layout.candidate_scales(1080)], {})
 check(f"the real badge (Lv 32, a JPEG of the game at 1080p) is read as 32 or left unknown, never another level ({got})",
@@ -1543,6 +1877,38 @@ for f in sorted(FRAMES.glob("exp_*.png")):
     check(f"a wrong remembered spot falls back to the whole picture, {size}", away is not None and m.read_layout(TPL, away) == (68601, 71.68))
 check("a blank picture has no bar", m.find_exp_v2(np.full((200, 1000, 3), 40, np.uint8)) is None)
 check("noise has no bar", m.find_exp_v2(np.random.default_rng(3).integers(0, 255, (200, 1000, 3), dtype=np.uint8)) is None)
+
+# ---- finder v2 with the game's filter on (F04): the digit next to "[" sits closer once the picture is sharpened
+import digits_v2  # noqa: E402
+import types  # noqa: E402
+vfeet = np.zeros((20, 30), np.uint8)
+vfeet[5:15, 10] = 60                                   # a "[": a dim thin stroke on its left, a short foot at the top and at the bottom
+vfeet[5, 10:12] = vfeet[14, 10:12] = 60
+stroke = m.Blob(0, 10, 5, 3, 10)
+check("a bracket alone has feet, whatever is looked at around it",
+      m._v2_has_feet(vfeet, stroke) and m._v2_has_feet(vfeet, stroke, m.V2_SIDE_FILTERED))
+vfeet[6:14, 14] = 255                                  # the stroke of the next digit, one px of gap away
+check("a digit that close fills the middle in the 2 px look (Default, as before): no feet",
+      not m._v2_has_feet(vfeet, stroke) and m.V2_SIDE == 2)
+check("...and not in the filtered 1 px look: the feet are seen", m._v2_has_feet(vfeet, stroke, m.V2_SIDE_FILTERED))
+crop = cv2.imread(str(FRAMES / "filtered_exp-1920x1080.png"))      # real filtered bar, 1920x1080: "EXP. 14,503 [6.03%]" (the "[" sits right before a 6)
+check("the real filtered bar is not found in the Default look (the bug)", crop is not None and m.find_exp_v2(crop) is None)
+f_lay = m.find_exp_v2(crop, filtered=True)
+check("...and is found and read with the filter on, 14,503 [6.03%]",
+      f_lay is not None and digits_v2.read_layout_v2(exp_font.load(), f_lay) == (14503, 6.03))
+check("...today's reader reads it too (no change there)", m.find_exp(crop) is not None
+      and m.read_layout(TPL, m.find_exp(crop)) == (14503, 6.03))
+for f in sorted(FRAMES.glob("exp_*.png")):
+    bar = cv2.imread(str(f))
+    check(f"filtered=True finds the Default bar too, same place, {f.stem[4:]}",
+          m.find_exp_v2(bar, filtered=True) is not None and m.find_exp_v2(bar) is not None
+          and m.find_exp_v2(bar, filtered=True).box == m.find_exp_v2(bar).box)
+r_f = m.ScreenReader(TPL)
+check("the reader's finder follows `filtered`: off = the Default look, on = the filtered look",
+      r_f.filtered is False and r_f._find_exp_v2(crop) is None)
+r_f._filter = types.SimpleNamespace(filtered=True)
+check("...on: it finds the bar", r_f._find_exp_v2(crop) is not None)
+check("the EXP shadow uses that finder", r_f.shadow.find.__func__ is m.ScreenReader._find_exp_v2)
 
 # ---- digit reader v2: draws the game's own font at the screen's scale and compares pixels
 import digits_v2  # noqa: E402
@@ -2500,6 +2866,40 @@ check("off-screen hint: scaling not 100% (physical pixels on both sides), 2880x1
 check("off-screen hint: the window moved down past the screen's bottom", m.bottom_off_screen((0, 300, 1920, 1080), S1080))
 check("off-screen hint: unknown screens or window, no hint",
       not m.bottom_off_screen((0, 0, 1920, 1228), []) and not m.bottom_off_screen(None, S1080))
+
+
+# ---- map name: a name that isn't on the game's list needs every try to agree (F07 filtered, F14 Default too)
+from collections import Counter  # noqa: E402
+box_pic = np.full((120, 460, 3), (200, 170, 110), np.uint8)             # (light-blue info box: BGR)
+cv2.putText(box_pic, "WARNING STREET", (115, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+cv2.putText(box_pic, "DEEP VALLEY I", (115, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+real_votes = m._ocr_votes
+
+
+def map_read(votes):
+    m._ocr_votes = lambda *a, **k: Counter(votes)
+    try:
+        return m.read_map_name(box_pic, 16)
+    finally:
+        m._ocr_votes = real_votes
+
+
+split = {"Deep Valley": 4, "Deep Valley I": 2}                         # (the real 5120x2880 filtered tries: the last "I" is dropped)
+check("map name: a name not on the list with a split vote is unknown, not a wrong name", map_read(split) is None)
+check("map name: ...also a misread one ('Deen Vallev II' 4 of 6)",
+      map_read({"Deen Vallev II": 4, "Deen Vallevil": 1, "Deep Vallev II": 1}) is None)
+check("map name: the Default 1920x1200 case, 'Deen Vallevil' in most tries, is unknown",
+      map_read({"Deen Vallevil": 5, "Deep Valley II": 1}) is None)
+check("map name: a name not on the list that every try gives is kept (an event map)",
+      map_read({"Halloween Event Field": 6}) == "Halloween Event Field")
+check("map name: an event map with one try off is unknown (no snapping of near misses)",
+      map_read({"Halloween Event Field": 5, "Halloween Event Fleld": 1}) is None)
+check("map name: a name on the list is still read from a plurality, in the game's spelling",
+      map_read({"Deep Valley II": 5, "Deep Valley": 1}) == "Deep Valley II")
+check("map name: a near miss of a listed name is snapped to the list ('Deep Vallev II' 4 of 6)",
+      map_read({"Deep Vallev II": 4, "Deep Valley II": 2}) == "Deep Valley II")
+check("map name: one try is still not enough", map_read({"Deep Valley II": 1}) is None)
+
 
 
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")

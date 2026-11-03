@@ -784,6 +784,53 @@ if app.hotkeys.supported:
     app.settings_win = None
     check("closing Settings leaves hotkeys working", getattr(app.hotkeys, "_paused", True) is False)
 
+# ---- No Reset (0.9.16, N02): the main window's switch, the pill, the hotkey, Settings, the Bar shape, remembered
+app.set_compact(False)
+app.cfg["no_reset"] = False
+app._show_no_reset()
+app.view.no_reset.toggle()                               # (a click)
+root.update()
+check("the No Reset switch turns it on for the numbers and the log, and saves it",
+      app.cfg["no_reset"] is True and app.session.no_reset and app.autolog.no_reset and m.load_config()["no_reset"] is True)
+from types import SimpleNamespace as NS                # (the pill's words, without the game window: a stand-in app)
+pill_for = lambda: m.App._state(NS(reader=NS(mode="window", hwnd=1), rejected=0, level_up_at=None, level=35, cfg=app.cfg,
+                                   tracker=NS(req=1, running=True, elapsed=lambda: 5.0), session=NS(waiting=None)))
+state = pill_for()
+check(f"...the pill says so ({state[1]!r})", state[1].endswith("No Reset"))
+check("...and the status line explains it (runs stay on this PC)", app._status_for("") == m.NO_RESET_ON)
+app._hotkey("no_reset")
+root.update()
+check("the No Reset hotkey turns it off again, switch included", app.cfg["no_reset"] is False and not app.session.no_reset
+      and not app.autolog.no_reset and app.view.no_reset.on is False and pill_for()[1] == "Tracking · Lv 35")
+app.open_settings()
+app.settings_win.update()
+app._no_reset_var.set(True)
+check("the Settings switch turns it on too, the main window's switch follows",
+      app.cfg["no_reset"] is True and app.view.no_reset.on is True)
+app.view.no_reset.toggle()
+check("...and the main window's switch moves the Settings one", app._no_reset_var.get() is False and app.cfg["no_reset"] is False)
+if app.hotkeys.supported:                               # (no hotkeys on a Mac: no Hotkeys section)
+    check("Hotkeys in Settings has a No Reset row, off by default", "no_reset" in app._hotkey_ui["buttons"]
+          and app.cfg["hotkeys"]["no_reset"] == "")
+app.settings_win.destroy()
+app.settings_win = None
+app.set_no_reset(True)
+app.cfg["compact_shape"] = "bar"
+app.set_compact(True)
+app._update_display()
+root.update()
+bar = app.view.strips["bar"]
+check("the Bar shape (no pill) shows a small No Reset word", bar.canvas.itemcget(bar._nr, "text") == "No Reset")
+app.set_no_reset(False)
+app._update_display()
+root.update()
+check("...gone when it's off", bar.canvas.itemcget(bar._nr, "text") == "")
+app.set_compact(False)
+app.set_no_reset(True)
+check("it's remembered after a restart", m.load_config()["no_reset"] is True)
+app.set_no_reset(False)
+app.no_reset_note = app.hotkey_note = None     # (their few-second notes would stand in for the status checks below on a slow machine)
+
 # ---- potion prices in Settings
 app.cfg["potion_prices"] = {}
 app.open_settings()
@@ -1110,6 +1157,12 @@ for _ in range(12):
     app._handle(pct_at(50.0, 150))
 check(f"A13-2: a level over the table is said as it is, not as trouble reading ({app.status.get()!r})",
       app.rejected == 0 and "150" in app.status.get() and "trouble" not in app.status.get())
+app.reset()
+just_up = blank._replace(where="Reading", candidates=[(144, 0.04)], confident=True, text="144 [0.04%]")
+for _ in range(12):                                     # just levelled up: too little % to learn the level's EXP from
+    app._handle(just_up)
+check(f"a bar read clearly right after a level-up is calibrating, not a misread ({app.rejected}, {app._state()})",
+      app.rejected == 0 and "trouble" not in app.status.get() and app._state()[0] != "alert")
 
 # ---- A13-4: a badge covered by a window counts as a failure, so the fallback is offered and the status says why
 app.reset()

@@ -209,8 +209,8 @@ log.reset_clock()                                                # Pause (the ap
 farm(log, t, 600)
 check("a pause restarts the run", len(log.runs) == 0)
 # ---- hotkeys
-check("hotkeys: Shift+1 to 4 by default", m.DEFAULT_HOTKEYS == {"start": "Shift+1", "reset": "Shift+2",
-                                                               "skip": "Shift+3", "compact": "Shift+4"})
+check("hotkeys: Shift+1 to 4 by default, No Reset without a key", m.DEFAULT_HOTKEYS == {
+    "start": "Shift+1", "reset": "Shift+2", "skip": "Shift+3", "compact": "Shift+4", "no_reset": ""})
 check("a hotkey needs Ctrl, Alt or Shift (or an F key), so it can't block plain typing",
       m.parse_hotkey("Shift+1") == (4, 0x31) and m.parse_hotkey("F5") == (0, 0x74)
       and m.parse_hotkey("A") is None and m.parse_hotkey("Win+1") is None and m.parse_hotkey("Shift+!") is None)
@@ -220,7 +220,7 @@ m.CONFIG_PATH.write_text(json.dumps({"hotkeys": {"start": "Ctrl+Q", "reset": "",
                                      "ui_scale": 3, "compact": "yes"}))
 cfg = m.load_config()
 check(f"hotkeys from the settings file: kept if valid or off, else the default ({cfg['hotkeys']})",
-      cfg["hotkeys"] == {"start": "Ctrl+Q", "reset": "", "skip": "Shift+3", "compact": "Shift+4"})
+      cfg["hotkeys"] == {"start": "Ctrl+Q", "reset": "", "skip": "Shift+3", "compact": "Shift+4", "no_reset": ""})
 check("a size or compact setting edited by hand can't break the window", cfg["ui_scale"] == 100 and cfg["compact"] is False)
 m.CONFIG_PATH.write_text(json.dumps({"compact_shape": "triangle", "seen_version": 5}))
 cfg = m.load_config()
@@ -287,6 +287,9 @@ if sys.platform == "darwin":
           and not macos.is_game(W(3, 12, "Google Chrome", "MapleStory Classic guide", 0, (0, 0, 800, 600), True), 99)
           and not macos.is_game(W(4, 99, "Python", "MapleStory", 0, (0, 0, 800, 600), True), 99)
           and not macos.is_game(W(5, 13, "wine64-preloader", "MapleStory", 25, (0, 0, 800, 600), True), 99))
+    check("Nexon's own Mac app is found above the menu bar's layer, but not as high as pop-up menus",
+          macos.is_game(W(6, 14, "MapleStory Classic World", "", 26, (0, 38, 1366, 796), True), 99)
+          and not macos.is_game(W(7, 14, "MapleStory Classic World", "", 101, (0, 0, 200, 100), True), 99))
     check("macOS windows can be listed", isinstance(macos.window_list(), list))
 if sys.platform.startswith("linux"):
     from platforms import linux
@@ -311,6 +314,7 @@ if sys.platform.startswith("linux"):
     check("a running game window's place on screen is read, and its own pixels with it "
           "(no game, or one that's minimized: nothing to check)",
           not games or rect is None or (shot is not None and shot[0].shape[2] == 3 and shot[1:] == rect[:2]))
+    check("a macOS window that isn't there can't be pictured", m.PLATFORM.capture_window(2 ** 31 - 1, 0, 0, 200, 100) is None)
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 # B06-1: hostile release notes / version names (a broken or tampered GitHub answer) can't freeze or stretch the overlay
@@ -322,6 +326,27 @@ for hostile in ("[" * 50000, "\n" * 50000, "\r\n" * 25000, "[a](" * 12500):
     slow = max(slow, _t.perf_counter() - t0)
 check("release notes made of one character repeated 50,000 times are cleaned in well under a second", slow < 1.0)
 check("...and a huge answer is cut before it is cleaned", len(m._plain_text("a" * 10_000_000)) <= 5000)
+# M05: the release body with three files (Windows zip + two .dmg) and the "Check this download" list, as build.yml's release job writes it
+_h = ["a1" * 32, "b2" * 32, "c3" * 32]
+_f = ["Maple-Classic-Exp-Overlay-v0.9.16-beta.zip", "Maple-Classic-Exp-Overlay-v0.9.16-beta-macOS-AppleSilicon.dmg",
+      "Maple-Classic-Exp-Overlay-v0.9.16-beta-macOS-Intel.dmg"]
+_body = ("**What's new**\r\n- **No Reset** keeps your numbers across maps, see [README](https://x/README.md)\r\n"
+         + "- more lines of notes\r\n" * 40
+         + "\r\n**A test download for Mac, not a release.** Not tested by me on a real Mac.\r\n\r\n---\r\n**Check this download**\r\n"
+         + "".join(f"- SHA-256 of {n}: `{h}` (also in SHA256SUMS.txt)\r\n" for n, h in zip(_f, _h))
+         + "- On Windows, in PowerShell: `Get-FileHash .\\<the file>`. On a Mac, in Terminal: `shasum -a 256 <the file>`\r\n"
+         "- Built by GitHub from this tag. Check a file: `gh attestation verify <the file> --repo beanguri/Maple-Classic-Exp-Overlay`\r\n"
+         "- The same files are on [the build's page](https://github.com/beanguri/Maple-Classic-Exp-Overlay/actions/runs/1), where GitHub shows the same SHA-256 for each.")
+_plain = m._plain_text(_body)
+_lines = _plain.split("\n")
+check("a release body with three files shows every file name and its full hash, one per line",
+      all(f"• SHA-256 of {n}: {h} (also in SHA256SUMS.txt)" in _lines for n, h in zip(_f, _h)))
+check("...with no markdown marks (**, backticks, link addresses) left in it",
+      "**" not in _plain and "`" not in _plain and "](" not in _plain and "https://x" not in _plain)
+check("...the commands in it still read right", "Get-FileHash .\\<the file>" in _plain and "shasum -a 256 <the file>" in _plain
+      and "gh attestation verify <the file> --repo beanguri/Maple-Classic-Exp-Overlay" in _plain)
+check("...a Mac test build's note stays in", "A test download for Mac, not a release. Not tested by me on a real Mac." in _lines)
+check("...and the whole check list fits under the 5000-character cut", len(_plain) < 5000 and _lines[-1].startswith("• The same files are on the build's page"))
 
 
 def _update_answer(tag, body="notes"):
@@ -377,7 +402,7 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
     check(f"updating from {old.name}: every log line, run, rename and setting is kept",
           len(log.entries) == len(before["entries"]) and all(same) and not any(log.edited(e) for e in log.entries)
           and len(log.runs) == len(before.get("runs", []))
-          and all(log.sealed(r, m._SEALED_RUN) or r.get("estimated") or r.get("party_unread") for r in log.runs)   # (their seals are meant not to verify)
+          and all(log.sealed(r, m._SEALED_RUN) or r.get("estimated") or r.get("party_unread") or r.get("no_reset") for r in log.runs)   # (their seals are meant not to verify)
           and log.aliases == before["aliases"] and not list(folder.glob("exp_log.damaged-*"))
           and (cfg["pos"], cfg["transparency"], cfg["gap_seconds"], cfg["topmost"]) == ([5300, 800], 30, 20, False))
     # the health question is still to come (nothing answers it for them), and an answer, once saved, is kept
@@ -1401,6 +1426,45 @@ s.map_seen("Rocky Road II")
 gains(s, 6.5)
 check("back on the same map, it carries on adding up", s.exp.running and s.exp.gained == gained + 100)
 
+# ---- No Reset (0.9.16, N02): farming across maps keeps one set of numbers
+A, B = "Rocky Road II", "The Swamp of Despair I"
+s = session()
+s.no_reset = True
+s.start(clock[0])
+gains(s, 30)
+looks_at = lambda v: [s.meso.observe(v, clock[0], s.exp.elapsed(), s.exp.running) for _ in range(3)]
+looks_at(150000)
+gained = s.exp.gained
+s.map_seen(B)
+check("No Reset: another map doesn't pause", s.waiting is None and s.exp.running and s.map == B)
+gains(s, 9.5)
+check(f"...and the numbers carry on there ({s.exp.gained})", s.exp.gained == gained + 300 and not s.meso.stale
+      and s.meso.value == 150000)
+s.map_seen(A)
+gains(s, 6.5)
+check("...and back again", s.waiting is None and s.exp.gained == gained + 500 and s.map == A)
+idle(s, 20)
+check("No Reset still pauses when idle", s.waiting == "idle" and not s.exp.running)
+gained = s.exp.gained
+s.map_seen(B)
+check("...a map change while idle makes the mesos count stale (a shop trip may follow), still no new numbers",
+      s.meso.stale and s.exp.gained == gained)
+gains(s, 6.5)
+check(f"...EXP on the other map carries on from the same numbers ({s.exp.gained})",
+      s.waiting is None and s.exp.running and s.exp.gained == gained + 100)
+s.map_blind()
+check("No Reset: a hidden map name doesn't pause", s.waiting is None and s.exp.running)
+s = session()
+s.start(clock[0])
+gains(s, 10)
+gained = s.exp.gained
+s.map_seen(B)
+check("without No Reset, another map pauses (as before)", s.waiting == "map")
+s.no_reset = True                                    # switched on while paused off the map
+gains(s, 6.5)
+check(f"...switched on then, the next EXP carries on without new numbers ({s.exp.gained})",
+      s.exp.running and s.exp.gained == gained + 100 and s.map == B)
+
 # a shop room has its own map name: going in pauses, coming back carries on, and the mesos stay put
 s = session()
 s.start(clock[0])
@@ -2143,6 +2207,66 @@ t, _ = farm(log, 0, 1000, estimated=True, party_read=False)
 check("estimated and party never read: kept the estimated seal, both marks, never shared",
       log.runs and all(r["seal"] == "estimated" and r.get("party_unread") and r.get("estimated") for r in log.runs)
       and log.unshared_runs() == [])
+
+# ---- No Reset (0.9.16, N02): runs stay on this PC; one log line covers every map ("Map A/Map B")
+A, B = "Rocky Road II", "The Swamp of Despair I"
+
+
+def cross(log, t, seconds, every=120, **kw):
+    """Farms on A and B in turn (every `every` seconds), EXP never stopping."""
+    end, i, logged = t + seconds, 0, []
+    while t < end:
+        t, got = farm(log, t, min(every, end - t), map_name=(A, B)[i % 2], **kw)
+        logged += got
+        i += 1
+    return t, logged
+
+
+log, _ = new_log()
+t, logged = cross(log, 0, 700)
+check(f"without No Reset, maps changed every 2 minutes log nothing (as before: {logged})", not logged and not log.runs)
+log, path = new_log()
+log.set_no_reset(True)
+t, logged = cross(log, 0, 1000)
+maps = {e["map"] for e in log.entries}
+check(f"No Reset: one log line covers both maps ({maps})", logged and maps == {f"{A}/{B}"}
+      and all(log.sealed(e) for e in log.entries))
+check(f"...the run covers both maps, is marked, sealed so nothing can share it ({[r.get('map') for r in log.runs]})",
+      len(log.runs) == 1 and log.runs[0]["map"] == f"{A}/{B}" and log.runs[0].get("no_reset")
+      and log.runs[0]["seal"] == "no_reset" and not log.sealed(log.runs[0], m._SEALED_RUN)
+      and log.unshared_runs() == [] and log.pending is None)
+check("...and it counts as a run done there", log.runs_done(f"{A}/{B}", 1, None) == 1)
+log.save()
+again = m.AutoLog(15, path, path.with_suffix(".txt"))
+check("...it survives saving and loading, still never shared", again.runs and again.unshared_runs() == []
+      and again.entries == log.entries and not list(path.parent.glob("exp_log.damaged-*")))
+check("a 'Map A/Map B' line is never taken as the name of the map you're on",
+      log.canonical(A) == A and log.canonical(f"{A}/{B}x") == f"{A}/{B}x")
+log, _ = new_log()
+log.set_no_reset(True)
+t, _ = farm(log, 0, 100)
+log.set_no_reset(False)                              # switched off during the run
+t, _ = farm(log, t, 1750)
+check(f"switched off during a run: that run stays on this PC, the next one is shared as usual "
+      f"({[r.get('no_reset') for r in log.runs]})",
+      len(log.runs) == 2 and log.runs[0].get("no_reset") and not log.runs[1].get("no_reset")
+      and log.unshared_runs() == [log.runs[1]])
+log, _ = new_log()
+t, _ = farm(log, 0, 300)
+log.set_no_reset(True)                               # switched on during a run, then off again at once
+log.set_no_reset(False)
+t, _ = farm(log, t, 700)
+check("switched on during a run (even for a moment): that run stays on this PC",
+      len(log.runs) == 1 and log.runs[0].get("no_reset") and log.unshared_runs() == [])
+log, _ = new_log()
+log.set_no_reset(True)
+t, _ = farm(log, 0, 1000, estimated=True)
+check("No Reset and estimated: the estimated seal stays (both marks, never shared)",
+      log.runs and log.runs[0]["seal"] == "estimated" and log.runs[0].get("no_reset") and log.unshared_runs() == [])
+long = ["Some Very Long Map Name Number %d In Victoria Island" % i for i in range(9)]
+label = m.AutoLog._maps_label(long)
+check(f"a line over many maps keeps its map name within the log's 200 characters ({len(label)})",
+      len(label) <= 200 and label.startswith(long[0]))
 
 # ---- EXP estimated from a % alone stays on this PC: marked in the log, never shared
 log, path = new_log()

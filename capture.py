@@ -21,6 +21,19 @@ def grab(sct, left, top, width, height):
     return np.ascontiguousarray(shot[:, :, :3]), x0, y0
 
 
+def black_out(shot, rect):
+    """The (bgr, left, top) screenshot with the screen rectangle `rect` blacked out (a copy, if any of it was inside)."""
+    if not shot or not rect:
+        return shot
+    img, sx, sy = shot
+    x0, y0 = max(0, rect[0] - sx), max(0, rect[1] - sy)
+    x1, y1 = min(img.shape[1], rect[0] + rect[2] - sx), min(img.shape[0], rect[1] + rect[3] - sy)
+    if x0 < x1 and y0 < y1:
+        img = img.copy()
+        img[y0:y1, x0:x1] = 0
+    return img, sx, sy
+
+
 class Capture:
     """The interface. Subclasses fill in grab() and, if they see through windows, the flag."""
     name = "screen"                     # for bug reports and health reports
@@ -35,6 +48,9 @@ class Capture:
     def end_look(self):
         """Called after the look, whatever happened."""
 
+    def window_at(self, handle, rect):
+        """Called in a look once the reader knows the game window (its handle) and where it is on screen."""
+
 
 class ScreenCapture(Capture):
     """A copy of the screen (mss): shows whatever is on top, so this app's own window is in the way."""
@@ -47,31 +63,42 @@ class ScreenCapture(Capture):
         return grab(self.sct, left, top, width, height)
 
 
-class WindowCapture(Capture):
-    """The game's own window's pixels, not the screen's, so a window on top of it (this app's own
-    included) isn't in the picture. `window` is the OS's way of reading it: window.rect() gives
-    (left, top, width, height) on screen or None, and window.grab(x, y, width, height) its bgr pixels
-    in the window's own coordinates, or None."""
+class WindowCapture(ScreenCapture):
+    """The game window pictured alone (platform.capture_window; macOS), so nothing on top of it, this app's
+    window included, is in the way. Each picture costs about the same whatever its size, so it's taken once per
+    look, the whole window, and every part inside it is cut from that. A part reaching outside the window, or a
+    look whose picture failed, is a screen copy as before: then this app's window does cover the game."""
 
-    name = "window"
+    def __init__(self, sct, platform, own_rect):
+        super().__init__(sct)
+        self.platform, self.own_rect = platform, own_rect     # own_rect(): this app's window on screen, or None
+        self.whole = self.rect = None
 
-    def __init__(self, window, sees_through=True):
-        self.window = window
-        # True: nothing on top of the game is in the picture (a compositing desktop). False: what shows
-        # through is, so the reader must still keep this app's own window off the game's areas.
-        self.sees_through_windows = sees_through
+    @property
+    def name(self):
+        return "window" if self.whole is not None else "screen"
+
+    @property
+    def sees_through_windows(self):
+        return self.whole is not None
+
+    def begin_look(self):
+        self.whole = self.rect = None
+
+    def window_at(self, handle, rect):
+        self.whole = self.platform.capture_window(handle, *rect) if handle and rect else None
+        self.rect = rect if self.whole is not None else None
 
     def grab(self, left, top, width, height):
-        rect = self.window.rect()
-        if not rect:
-            return None
-        wx, wy, ww, wh = rect
-        x0, y0 = max(left, wx), max(top, wy)
-        x1, y1 = min(left + width, wx + ww), min(top + height, wy + wh)
-        if x1 - x0 < 8 or y1 - y0 < 8:                  # (as for a rectangle off the monitors, above)
-            return None
-        pixels = self.window.grab(x0 - wx, y0 - wy, x1 - x0, y1 - y0)
-        return (pixels, x0, y0) if pixels is not None else None
+        whole, rect = self.whole, self.rect          # (they are set together: a picture only comes with its place)
+        if whole is not None and rect is not None:
+            x, y, w, h = rect
+            if x <= left and y <= top and left + width <= x + w and top + height <= y + h:
+                part = whole[top - y:top - y + height, left - x:left - x + width, :3]
+                return np.ascontiguousarray(part), left, top
+        shot = super().grab(left, top, width, height)
+        # (a screen copy in a see-through look: the reader won't hide this app's window from it, so it's hidden here)
+        return black_out(shot, self.own_rect()) if whole is not None else shot
 
 
 def as_capture(source):
