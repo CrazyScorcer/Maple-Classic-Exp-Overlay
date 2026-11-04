@@ -109,12 +109,6 @@ class Platform(ABC):
         """Why other programs' windows can't be seen right now, or None if they can."""
         return None
 
-    def window_capture(self):
-        """A Capture that reads the game's own window instead of the screen, or None where this OS
-        can't give one. Following the game uses it when it's there; a selected area is always a
-        picture of the screen."""
-        return None
-
     def screen_capture_note(self):
         """Why a picture of the whole screen can't be read right now, or None if it can."""
         return None
@@ -139,6 +133,11 @@ class Platform(ABC):
         """A screen rectangle inside that window as only the window shows it (an (h, w, 4) BGRA
         array, like mss gives), or None if that can't be done right now."""
         return None
+
+    def window_picture_sees_through(self):
+        """True when capture_window's picture is the window alone, with nothing that is on top of it
+        in it (macOS always composites windows; an X11 desktop without a compositing manager doesn't)."""
+        return True
 
     @abstractmethod
     def own_window_rect(self, root):

@@ -2,7 +2,7 @@
 by its title or window class, and positions are in pixels: the units mss screenshots and
 tkinter use too. A Wayland session keeps the screen out of X11's reach, so a picture of the
 whole screen can't be taken there: the game is read from its own window's pixels instead (see
-window_capture), which also means a window on top of the game does no harm."""
+capture_window), which also means a window on top of the game does no harm."""
 import ctypes
 import ctypes.util
 import fcntl
@@ -18,8 +18,6 @@ from pathlib import Path
 from tkinter import messagebox
 
 import numpy as np
-
-from capture import WindowCapture
 
 from .base import Hotkeys, Platform, parse_hotkey
 
@@ -318,7 +316,8 @@ def is_game(w, own_pid):
 
 
 def window_image(xid, x, y, width, height):
-    """A window's own pixels (its picture, whatever is on top of it): bgr (h, w, 3), or None."""
+    """A window's own pixels (its picture, whatever is on top of it), as mss gives them: BGRA
+    (h, w, 4), or None."""
     dpy = _display()
     if not dpy or width < 1 or height < 1:
         return None
@@ -334,22 +333,7 @@ def window_image(xid, x, y, width, height):
     finally:
         _XDestroyImage(image)
     rows = np.frombuffer(raw, np.uint8).reshape(height_, line)[:, :width_ * 4]
-    return np.ascontiguousarray(rows.reshape(height_, width_, 4)[:, :, :3])
-
-
-class _GameWindow:
-    """The game's window for capture.WindowCapture: where it is on screen, and its own pixels."""
-
-    def __init__(self, platform):
-        self.platform, self.xid = platform, None
-
-    def rect(self):
-        if not (self.xid and self.platform.window_exists(self.xid)):
-            self.xid = self.platform.find_game_window()     # (the game was closed, or started again)
-        return self.platform.client_rect(self.xid) if self.xid else None
-
-    def grab(self, x, y, width, height):
-        return window_image(self.xid, x, y, width, height) if self.xid else None
+    return np.ascontiguousarray(rows.reshape(height_, width_, 4))
 
 
 # --------------------------------------------------------------------------- hotkeys
@@ -524,7 +508,7 @@ def _activate(dpy, xid):
 
 def _wayland():
     """Is this a Wayland session? (Its compositor keeps the screen out of X11's reach, though a
-    window's own pixels can still be read: see window_capture.)"""
+    window's own pixels can still be read: see capture_window.)"""
     return (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
             or bool(os.environ.get("WAYLAND_DISPLAY")))
 
@@ -554,6 +538,7 @@ def _screen_dpi(dpy):
 
 class LinuxPlatform(Platform):
     name = "Linux"
+    captures_window_alone = True                # (a window's own pixels: see capture_window)
 
     def __init__(self):
         self._marked = set()                    # (our windows that were told which program they belong to)
@@ -692,11 +677,19 @@ class LinuxPlatform(Platform):
     def create_hotkeys(self, on_press):
         return LinuxHotkeys(on_press)
 
-    def window_capture(self):
-        # A compositing desktop keeps each window's own picture, so what is on top of the game isn't in
-        # it; without one there's only what shows through, which the reader must treat as a copy of the
-        # screen (a window of this app on top of the EXP bar would be in the picture).
-        return WindowCapture(_GameWindow(self), sees_through=self.composited())
+    def capture_window(self, handle, left, top, width, height):
+        """The game window's own pixels, taken once, the whole window (BGRA, as mss gives them), or
+        None when X11 can't give them. The game is read from these on a Wayland session, where the
+        screen itself can't be pictured."""
+        dpy = _display()
+        if not dpy or not handle or width < 1 or height < 1:
+            return None
+        return window_image(handle, 0, 0, width, height)
+
+    def window_picture_sees_through(self):
+        """A compositing desktop keeps each window's own picture, so what is on top of the game isn't
+        in it; without one, X11 gives what shows through, which the reader must treat as the screen."""
+        return self.composited()
 
     def composited(self):
         """Is a compositing manager running? (Then a window's picture is its own, not the screen's.)"""

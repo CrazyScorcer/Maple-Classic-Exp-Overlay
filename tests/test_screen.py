@@ -1660,46 +1660,6 @@ for cap_class, wanted in ((ScreenCapture, False), (SeeThrough, True)):
           r.diagnostics()["capture"] == cap.name and "EXP bar" in r.diagnostics()["covering"])
 
 
-class FakeWindow:
-    """A window at `at` showing `bgr`, for capture.WindowCapture (no screen and no X server needed)."""
-
-    def __init__(self, bgr, at=(0, 0)):
-        self.bgr, self.at, self.calls = bgr, at, []
-
-    def rect(self):
-        return self.at[0], self.at[1], self.bgr.shape[1], self.bgr.shape[0]
-
-    def grab(self, x, y, width, height):
-        self.calls.append((x, y, width, height))
-        return self.bgr[y:y + height, x:x + width]
-
-
-window = FakeWindow(np.zeros((300, 400, 3), np.uint8), at=(100, 50))
-wcap = WindowCapture(window)
-part = wcap.grab(150, 80, 200, 100)                    # (only part of it is on the window)
-check("a window capture asks the window for the part of the rectangle it has, and says where it was",
-      part is not None and part[1:] == (150, 80) and window.calls == [(50, 30, 200, 100)]
-      and part[0].shape[:2] == (100, 200))
-check("...and gives nothing for a rectangle that is off the window",
-      wcap.grab(0, 0, 20, 20) is None and wcap.grab(150, 80, 5, 5) is None)
-check("a window capture is named 'window' and sees through what is on top of it",
-      wcap.name == "window" and wcap.sees_through_windows)
-r = m.ScreenReader(m.DigitTemplates.load())
-wcap = WindowCapture(FakeWindow(frame))
-first = r._read_window(wcap, rect_f)
-bx, by, bw, bh = r.box
-r.own_rect = (bx, by, bw, bh)                          # this window right on top of the bar
-r.last_rect, r.gh = rect_f, r.gh
-again = r._read_window(wcap, rect_f)
-check("following the game reads the bar from the game window's own pixels, even under this window",
-      first.confident and again.confident)
-r = m.ScreenReader(m.DigitTemplates.load())
-plain = WindowCapture(FakeWindow(frame), sees_through=False)     # (no compositing desktop)
-first = r._read_window(plain, rect_f)
-bx, by, bw, bh = r.box
-r.own_rect, r.last_rect, r.gh = (bx, by, bw, bh), rect_f, r.gh
-check("a window capture without a compositing desktop still says this app's window is in the way",
-      first.confident and "covering" in r._read_window(plain, rect_f).where)
 check("the bare fake screen is wrapped as a screen copy", isinstance(m.as_capture(FakeScreen(frame)), ScreenCapture)
       and isinstance(m.as_capture(SeeThrough(None)), Capture))
 
@@ -1713,6 +1673,7 @@ class OneWindow:
 
     def __init__(self, rect, alone):
         self.rect, self.alone, self.asked = rect, alone, []
+        self.see_through = True
 
     def find_game_window(self):
         return 7
@@ -1725,6 +1686,9 @@ class OneWindow:
 
     def missing_permission(self):
         return None
+
+    def window_picture_sees_through(self):
+        return self.see_through
 
     def capture_window(self, number, left, top, width, height):
         self.asked.append((number, left, top, width, height))
@@ -1771,6 +1735,29 @@ check("if picturing the window alone fails, the screen is used, still without ev
 got, _ = read_through(OneWindow((50, 30, 1280, 720), None), on_screen)
 check("...and it says when this app's window is covering the bar, as a screen copy does",
       not any(x.confident for x in got) and "covering" in got[-1].where)
+
+
+class NoCompositor(OneWindow):
+    """An X11 desktop with no compositing manager running: the window's picture is what shows through it."""
+
+    def window_picture_sees_through(self):
+        return False
+
+
+real_platform, real_ok = m.PLATFORM, m.tesseract_ok
+m.PLATFORM, m.tesseract_ok = NoCompositor((50, 30, 1280, 720), alone), False
+try:
+    r = m.ScreenReader(m.DigitTemplates.load())
+    cap = WindowCapture(FakeScreen(on_screen), m.PLATFORM, lambda: r.own_rect)
+    clear = r.read(cap)                                # (nothing of this app's in the way: read as usual)
+    r.own_rect, r.last_rect, r.gh = own, (50, 30, 1280, 720), r.gh     # this app's window over the EXP bar
+    over = r.read(cap)
+    check("a window pictured without a compositing manager is read, but this app's window over the EXP bar "
+          "still says 'covering'",
+          clear.confident and "covering" in over.where and r.diagnostics()["capture"] == "window")
+finally:
+    m.PLATFORM, m.tesseract_ok = real_platform, real_ok
+
 
 class NoPermission(OneWindow):
     """Nexon's Mac app is found by its program name, which macOS shows without the Screen Recording permission."""

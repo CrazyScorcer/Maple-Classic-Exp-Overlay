@@ -3,7 +3,7 @@
 The reader asks a Capture for a rectangle in SCREEN coordinates and gets it back as (bgr, left, top), or
 None when it is off the monitors. A copy of the screen (ScreenCapture) shows whatever window is on top,
 this app's included. A window's own picture (WindowCapture, where the OS can give it: see
-Platform.window_capture) doesn't, which it says with `sees_through_windows`, so the reader doesn't skip
+Platform.capture_window) doesn't, which it says with `sees_through_windows`, so the reader doesn't skip
 areas this app covers."""
 
 import numpy as np
@@ -64,15 +64,16 @@ class ScreenCapture(Capture):
 
 
 class WindowCapture(ScreenCapture):
-    """The game window pictured alone (platform.capture_window; macOS), so nothing on top of it, this app's
-    window included, is in the way. Each picture costs about the same whatever its size, so it's taken once per
-    look, the whole window, and every part inside it is cut from that. A part reaching outside the window, or a
+    """The game window pictured alone (platform.capture_window; macOS and Linux), so nothing on top of it, this
+    app's window included, is in the way. Each picture costs about the same whatever its size, so it's taken once
+    per look, the whole window, and every part inside it is cut from that. A part reaching outside the window, or a
     look whose picture failed, is a screen copy as before: then this app's window does cover the game."""
 
     def __init__(self, sct, platform, own_rect):
         super().__init__(sct)
         self.platform, self.own_rect = platform, own_rect     # own_rect(): this app's window on screen, or None
         self.whole = self.rect = None
+        self.see_through = False                             # (that picture is the window alone, nothing on top of it)
 
     @property
     def name(self):
@@ -80,14 +81,16 @@ class WindowCapture(ScreenCapture):
 
     @property
     def sees_through_windows(self):
-        return self.whole is not None
+        return self.see_through
 
     def begin_look(self):
         self.whole = self.rect = None
+        self.see_through = False
 
     def window_at(self, handle, rect):
         self.whole = self.platform.capture_window(handle, *rect) if handle and rect else None
         self.rect = rect if self.whole is not None else None
+        self.see_through = self.whole is not None and self.platform.window_picture_sees_through()
 
     def grab(self, left, top, width, height):
         whole, rect = self.whole, self.rect          # (they are set together: a picture only comes with its place)

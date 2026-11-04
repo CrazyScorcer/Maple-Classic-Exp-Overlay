@@ -291,6 +291,8 @@ if sys.platform == "darwin":
           macos.is_game(W(6, 14, "MapleStory Classic World", "", 26, (0, 38, 1366, 796), True), 99)
           and not macos.is_game(W(7, 14, "MapleStory Classic World", "", 101, (0, 0, 200, 100), True), 99))
     check("macOS windows can be listed", isinstance(macos.window_list(), list))
+    check("a macOS window that isn't there can't be pictured",
+          m.PLATFORM.capture_window(2 ** 31 - 1, 0, 0, 200, 100) is None)
 if sys.platform.startswith("linux"):
     from platforms import linux
     W = linux.LinuxWindow
@@ -307,14 +309,17 @@ if sys.platform.startswith("linux"):
           linux.keysym_to_vk("a") == 0x41 and linux.keysym_to_vk("1") == 0x31
           and linux.keysym_to_vk("F12") == 0x7B and linux.keysym_to_vk("Tab") is None)
     # Following the game reads the game's own window, so this needs one to be running.
+    linux_platform = linux.LinuxPlatform()
     games = [w for w in linux.window_list() if linux.is_game(w, os.getpid())]
-    capture = linux.LinuxPlatform().window_capture() if games else None
-    rect = capture.window.rect() if capture else None
-    shot = capture.grab(*rect) if rect else None
+    handle = linux_platform.find_game_window() if games else None
+    rect = linux_platform.client_rect(handle) if handle else None
+    shot = linux_platform.capture_window(handle, *rect) if rect else None
     check("a running game window's place on screen is read, and its own pixels with it "
           "(no game, or one that's minimized: nothing to check)",
-          not games or rect is None or (shot is not None and shot[0].shape[2] == 3 and shot[1:] == rect[:2]))
-    check("a macOS window that isn't there can't be pictured", m.PLATFORM.capture_window(2 ** 31 - 1, 0, 0, 200, 100) is None)
+          not games or rect is None or (shot is not None and shot.shape[2] == 4
+                                        and shot.shape[:2] == (rect[3], rect[2])))
+    check("an X11 window that isn't there can't be pictured",
+          linux_platform.capture_window(2 ** 31 - 1, 0, 0, 200, 100) is None)
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 # B06-1: hostile release notes / version names (a broken or tampered GitHub answer) can't freeze or stretch the overlay

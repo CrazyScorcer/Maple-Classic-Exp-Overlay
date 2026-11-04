@@ -5708,8 +5708,7 @@ class App:
                         try:
                             # Following the game reads its own window where the OS can, so what is on top
                             # of the game doesn't matter; a selected area is a picture of the screen.
-                            source = window if window and getattr(self.reader, "mode", "") == "window" else screen
-                            reading = self.reader.read(source)
+                            reading = self.reader.read(capture)
                             self.q.put(("reading", reading._replace(ms=(time.monotonic() - t0) * 1000)))
                             self.health.finished(t0)
                         except Exception as e:
