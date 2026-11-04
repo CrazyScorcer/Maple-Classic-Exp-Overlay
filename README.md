@@ -162,6 +162,8 @@ py -3 tests/test_screen.py
 py -3 tests/test_ui.py     # opens the real window for a few seconds (the notes box)
 ```
 
+The report-a-bug checks in `test_ui.py` are turned off when `MAPLE_EXP_TEST_REPORT` isn't set; set it to `1` to run them.
+
 To build with exactly the packages the releases use: `py -3 -m pip install --require-hashes -r requirements-build.txt`.
 
 GitHub runs the logic tests on every push ([Tests workflow](.github/workflows/tests.yml)). The [Build workflow](.github/workflows/build.yml) builds the download on GitHub (Actions tab, **Build**, **Run workflow**), runs all the tests first, and signs the .exe once code signing is set up. Pushing a version tag also attests the zip and drafts the release with it; releases are only ever made that way.

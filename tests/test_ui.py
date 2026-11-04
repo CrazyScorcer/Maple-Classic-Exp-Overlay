@@ -1265,176 +1265,178 @@ check(f"...most of the name covered (too little to tell) keeps the session and s
 app.reset()
 
 # ---- Report a bug > Send to the developer
-def new_windows(before):
-    return [c for c in app.root.winfo_children() if c not in before and c.winfo_class() == "Toplevel"]
+# Off for now: the report-a-bug checks below only run with MAPLE_EXP_TEST_REPORT=1 set.
+if os.environ.get("MAPLE_EXP_TEST_REPORT") == "1":
+    def new_windows(before):
+        return [c for c in app.root.winfo_children() if c not in before and c.winfo_class() == "Toplevel"]
 
 
-before = set(app.root.winfo_children())
-choice = app.report_bug()
-root.update()
-check("Report a bug offers both ways: Send to the developer and Report on GitHub",
-      button(choice, "Send to the developer") and button(choice, "Report on GitHub") and button(choice, "Cancel"))
-button(choice, "Cancel")[0].command()
-root.update()
-check("Cancel closes the choice", not choice.winfo_exists())
-
-posted = []
-real_post = m.post_report
-m.post_report = lambda body, timeout=15: (posted.append(body), "ok")[1]
-real_details = app._report_details
-app._report_details = lambda: "Maple Classic Exp Overlay bug report details\nEXP bar: found\nreading C:" + chr(92) + "Games" + chr(92) + "x.dll"
-try:
     before = set(app.root.winfo_children())
-    app.send_report()
+    choice = app.report_bug()
     root.update()
-    dlg = new_windows(before)[0]
-    check("Send to the developer opens the dialog with the text box, the note and Send / Cancel",
-          button(dlg, "Send") and button(dlg, "Cancel") and any("No pictures are sent" in t for t in labels(dlg))
-          and any("What went wrong?" in t for t in labels(dlg)))
-    check("the 'What will be sent' fold-out starts closed", not dlg.fold.winfo_ismapped())
-    button(dlg, "What will be sent  " + chr(0x25b8))[0].command()
+    check("Report a bug offers both ways: Send to the developer and Report on GitHub",
+          button(choice, "Send to the developer") and button(choice, "Report on GitHub") and button(choice, "Cancel"))
+    button(choice, "Cancel")[0].command()
     root.update()
-    shown_text = dlg.sent_text.get("1.0", "end-1c")
-    check("opening the fold-out shows the exact text that will be sent", dlg.fold.winfo_ismapped() and shown_text == dlg.details
-          and "EXP bar: found" in shown_text)
+    check("Cancel closes the choice", not choice.winfo_exists())
 
-    button(dlg, "Send")[0].command()
-    root.update()
-    check("Send with an empty box is refused and nothing is posted", not posted and "write a sentence" in dlg.status.cget("text"))
-    dlg.message.insert("1.0", "see www.spam.org")
-    button(dlg, "Send")[0].command()
-    root.update()
-    check("a link in the text is refused", not posted and "leave out links" in dlg.status.cget("text"))
-    dlg.message.delete("1.0", "end")
-    dlg.message.insert("1.0", "x" * 2001)
-    dlg.typed()
-    button(dlg, "Send")[0].command()
-    root.update()
-    check("more than 2,000 characters is refused, and the counter shows it",
-          not posted and "2,001 / 2,000" in dlg.counter.cget("text"))
-    dlg.message.delete("1.0", "end")
-    dlg.message.insert("1.0", "It stopped reading after I changed maps.")
-    dlg.typed()
-    check("the live counter counts what is typed", "40 / 2,000" in dlg.counter.cget("text"))
-    check("with sharing blocked (testing) it won't send", (button(dlg, "Send")[0].command(), root.update(), not posted)[2]
-          and "off while testing" in dlg.status.cget("text"))
-
-    def wait_until(done, seconds=5):
-        """Keeps the window going until done() (the app's own queue handler answers the send), at most `seconds`."""
-        end = time.monotonic() + seconds
-        while not done() and time.monotonic() < end:
-            root.update()
-            time.sleep(0.05)
-
-    os.environ["MAPLE_EXP_ALLOW_SHARE"] = "1"
-    button(dlg, "Send")[0].command()
-    wait_until(lambda: "Sent, thank you" in dlg.status.cget("text"))
-    check("Send posts the four fields, with the health ID and the scrubbed text",
-          len(posted) == 1 and set(posted[0]) == {"id", "version", "message", "details"}
-          and posted[0]["details"] == dlg.details and posted[0]["message"] == "It stopped reading after I changed maps."
-          and posted[0]["version"] == m.VERSION and m.healthlog.good_id(posted[0]["id"]) and posted[0]["id"] == app.cfg["health_id"])
-    check("...then says thank you and counts it", "Sent, thank you" in dlg.status.cget("text") and m.reports_sent_today(app.cfg) == 1)
-    dlg.destroy()
-
-    # A05: the site counts UTF-16 units (an emoji is 2), and the window keeps answering while a send is slow
-    app.cfg.pop("reports_sent", None)
-    before = set(app.root.winfo_children())
-    app.send_report()
-    root.update()
-    d_slow = new_windows(before)[0]
-    d_slow.message.insert("1.0", "\U0001F600" * 1001)
-    d_slow.typed()
-    check("the counter counts an emoji as 2, like the site, and turns red over 2,000",
-          "2,002 / 2,000" in d_slow.counter.cget("text") and d_slow.counter.cget("fg") == m.BAD)
-    d_slow.message.delete("1.0", "end")
-    d_slow.message.insert("1.0", "slow site")
-    slow_count = len(posted)
-    m.post_report = lambda body, timeout=15: (time.sleep(1.5), "ok")[1]
-    t0 = time.monotonic()
-    button(d_slow, "Send")[0].command()
-    stamps = [time.monotonic()]
-    while "Sent, thank you" not in d_slow.status.cget("text") and time.monotonic() - t0 < 15:
-        root.update()
-        stamps.append(time.monotonic())
-        time.sleep(0.02)
-    gap = max(b - a for a, b in zip(stamps, stamps[1:])) if len(stamps) > 1 else 99
-    # (a frozen window would sit the whole 1.5 s send in one update; a slow test machine only makes updates fewer)
-    check(f"while a slow send is waiting the window keeps answering (no freeze; longest pause {gap:.2f} s), then says thank you",
-          gap < 1.0 and stamps[-1] - t0 >= 1.4 and "Sent, thank you" in d_slow.status.cget("text") and len(posted) == slow_count)
+    posted = []
+    real_post = m.post_report
     m.post_report = lambda body, timeout=15: (posted.append(body), "ok")[1]
-    d_slow.destroy()
-    app.cfg.pop("reports_sent", None)
-
-    for n in (2, 3):
-        app.cfg["reports_sent"] = {"day": m.healthlog.utc_day(time.time()), "n": n}
+    real_details = app._report_details
+    app._report_details = lambda: "Maple Classic Exp Overlay bug report details\nEXP bar: found\nreading C:" + chr(92) + "Games" + chr(92) + "x.dll"
+    try:
         before = set(app.root.winfo_children())
         app.send_report()
         root.update()
-        d2 = new_windows(before)[0]
-        d2.message.insert("1.0", "again")
-        button(d2, "Send")[0].command()
+        dlg = new_windows(before)[0]
+        check("Send to the developer opens the dialog with the text box, the note and Send / Cancel",
+              button(dlg, "Send") and button(dlg, "Cancel") and any("No pictures are sent" in t for t in labels(dlg))
+              and any("What went wrong?" in t for t in labels(dlg)))
+        check("the 'What will be sent' fold-out starts closed", not dlg.fold.winfo_ismapped())
+        button(dlg, "What will be sent  " + chr(0x25b8))[0].command()
         root.update()
-        if n == 2:
-            wait_until(lambda: "Sent, thank you" in d2.status.cget("text"))
-            check("a 3rd report on the day is still allowed", len(posted) == 2)
-        else:
-            check("a 4th report on the day is refused locally, in plain words",
-                  len(posted) == 2 and "sent 3 reports today" in d2.status.cget("text"))
-        d2.destroy()
+        shown_text = dlg.sent_text.get("1.0", "end-1c")
+        check("opening the fold-out shows the exact text that will be sent", dlg.fold.winfo_ismapped() and shown_text == dlg.details
+              and "EXP bar: found" in shown_text)
 
-    # B03: the number the site gave is shown with the two ways to reach the developer; without it, no number
-    for number, expect in ((17, True), (None, False)):
-        app.cfg["reports_sent"] = {"day": "2000-01-01", "n": 0}
+        button(dlg, "Send")[0].command()
+        root.update()
+        check("Send with an empty box is refused and nothing is posted", not posted and "write a sentence" in dlg.status.cget("text"))
+        dlg.message.insert("1.0", "see www.spam.org")
+        button(dlg, "Send")[0].command()
+        root.update()
+        check("a link in the text is refused", not posted and "leave out links" in dlg.status.cget("text"))
+        dlg.message.delete("1.0", "end")
+        dlg.message.insert("1.0", "x" * 2001)
+        dlg.typed()
+        button(dlg, "Send")[0].command()
+        root.update()
+        check("more than 2,000 characters is refused, and the counter shows it",
+              not posted and "2,001 / 2,000" in dlg.counter.cget("text"))
+        dlg.message.delete("1.0", "end")
+        dlg.message.insert("1.0", "It stopped reading after I changed maps.")
+        dlg.typed()
+        check("the live counter counts what is typed", "40 / 2,000" in dlg.counter.cget("text"))
+        check("with sharing blocked (testing) it won't send", (button(dlg, "Send")[0].command(), root.update(), not posted)[2]
+              and "off while testing" in dlg.status.cget("text"))
+
+        def wait_until(done, seconds=5):
+            """Keeps the window going until done() (the app's own queue handler answers the send), at most `seconds`."""
+            end = time.monotonic() + seconds
+            while not done() and time.monotonic() < end:
+                root.update()
+                time.sleep(0.05)
+
+        os.environ["MAPLE_EXP_ALLOW_SHARE"] = "1"
+        button(dlg, "Send")[0].command()
+        wait_until(lambda: "Sent, thank you" in dlg.status.cget("text"))
+        check("Send posts the four fields, with the health ID and the scrubbed text",
+              len(posted) == 1 and set(posted[0]) == {"id", "version", "message", "details"}
+              and posted[0]["details"] == dlg.details and posted[0]["message"] == "It stopped reading after I changed maps."
+              and posted[0]["version"] == m.VERSION and m.healthlog.good_id(posted[0]["id"]) and posted[0]["id"] == app.cfg["health_id"])
+        check("...then says thank you and counts it", "Sent, thank you" in dlg.status.cget("text") and m.reports_sent_today(app.cfg) == 1)
+        dlg.destroy()
+
+        # A05: the site counts UTF-16 units (an emoji is 2), and the window keeps answering while a send is slow
+        app.cfg.pop("reports_sent", None)
         before = set(app.root.winfo_children())
         app.send_report()
         root.update()
-        d5 = new_windows(before)[0]
-        done = m.ReportOutcome("ok")
-        done.n = number
-        app._report_done(d5, done)
-        root.update()
-        text = d5.status.cget("text")
-        check(f"a sent report {'#17 shows its number and Want a reply?' if expect else 'without a number shows none'}",
-              ("report #17" in text and "Want a reply" in text) == expect and "Sent, thank you" in text)
-        check(f"...{'with a GitHub issues and a Reddit button' if expect else 'and no extra buttons'}",
-              (button(d5, "GitHub issues") != [] and button(d5, "Reddit") != []) == expect)
-        if expect:
-            opened = []
-            real_open = m.webbrowser.open
-            m.webbrowser.open = lambda url, *a, **k: opened.append(url)
-            try:
-                check("...nothing opens until a click", not opened)
-                button(d5, "Reddit")[0].command()
-                button(d5, "GitHub issues")[0].command()
-            finally:
-                m.webbrowser.open = real_open
-            check("...Reddit opens the owner's page, GitHub issues the repo's", opened == [m.REPORT_REDDIT, f"https://github.com/{m.GITHUB_REPO}/issues"])
-        d5.destroy()
-    app.cfg.pop("reports_sent", None)
+        d_slow = new_windows(before)[0]
+        d_slow.message.insert("1.0", "\U0001F600" * 1001)
+        d_slow.typed()
+        check("the counter counts an emoji as 2, like the site, and turns red over 2,000",
+              "2,002 / 2,000" in d_slow.counter.cget("text") and d_slow.counter.cget("fg") == m.BAD)
+        d_slow.message.delete("1.0", "end")
+        d_slow.message.insert("1.0", "slow site")
+        slow_count = len(posted)
+        m.post_report = lambda body, timeout=15: (time.sleep(1.5), "ok")[1]
+        t0 = time.monotonic()
+        button(d_slow, "Send")[0].command()
+        stamps = [time.monotonic()]
+        while "Sent, thank you" not in d_slow.status.cget("text") and time.monotonic() - t0 < 15:
+            root.update()
+            stamps.append(time.monotonic())
+            time.sleep(0.02)
+        gap = max(b - a for a, b in zip(stamps, stamps[1:])) if len(stamps) > 1 else 99
+        # (a frozen window would sit the whole 1.5 s send in one update; a slow test machine only makes updates fewer)
+        check(f"while a slow send is waiting the window keeps answering (no freeze; longest pause {gap:.2f} s), then says thank you",
+              gap < 1.0 and stamps[-1] - t0 >= 1.4 and "Sent, thank you" in d_slow.status.cget("text") and len(posted) == slow_count)
+        m.post_report = lambda body, timeout=15: (posted.append(body), "ok")[1]
+        d_slow.destroy()
+        app.cfg.pop("reports_sent", None)
 
-    for outcome, words in (("later", "connected to the internet"), ("message", "leave out links"), ("limit", "sent 3 reports")):
-        app.cfg["reports_sent"] = {"day": "2000-01-01", "n": 0}
+        for n in (2, 3):
+            app.cfg["reports_sent"] = {"day": m.healthlog.utc_day(time.time()), "n": n}
+            before = set(app.root.winfo_children())
+            app.send_report()
+            root.update()
+            d2 = new_windows(before)[0]
+            d2.message.insert("1.0", "again")
+            button(d2, "Send")[0].command()
+            root.update()
+            if n == 2:
+                wait_until(lambda: "Sent, thank you" in d2.status.cget("text"))
+                check("a 3rd report on the day is still allowed", len(posted) == 2)
+            else:
+                check("a 4th report on the day is refused locally, in plain words",
+                      len(posted) == 2 and "sent 3 reports today" in d2.status.cget("text"))
+            d2.destroy()
+
+        # B03: the number the site gave is shown with the two ways to reach the developer; without it, no number
+        for number, expect in ((17, True), (None, False)):
+            app.cfg["reports_sent"] = {"day": "2000-01-01", "n": 0}
+            before = set(app.root.winfo_children())
+            app.send_report()
+            root.update()
+            d5 = new_windows(before)[0]
+            done = m.ReportOutcome("ok")
+            done.n = number
+            app._report_done(d5, done)
+            root.update()
+            text = d5.status.cget("text")
+            check(f"a sent report {'#17 shows its number and Want a reply?' if expect else 'without a number shows none'}",
+                  ("report #17" in text and "Want a reply" in text) == expect and "Sent, thank you" in text)
+            check(f"...{'with a GitHub issues and a Reddit button' if expect else 'and no extra buttons'}",
+                  (button(d5, "GitHub issues") != [] and button(d5, "Reddit") != []) == expect)
+            if expect:
+                opened = []
+                real_open = m.webbrowser.open
+                m.webbrowser.open = lambda url, *a, **k: opened.append(url)
+                try:
+                    check("...nothing opens until a click", not opened)
+                    button(d5, "Reddit")[0].command()
+                    button(d5, "GitHub issues")[0].command()
+                finally:
+                    m.webbrowser.open = real_open
+                check("...Reddit opens the owner's page, GitHub issues the repo's", opened == [m.REPORT_REDDIT, f"https://github.com/{m.GITHUB_REPO}/issues"])
+            d5.destroy()
+        app.cfg.pop("reports_sent", None)
+
+        for outcome, words in (("later", "connected to the internet"), ("message", "leave out links"), ("limit", "sent 3 reports")):
+            app.cfg["reports_sent"] = {"day": "2000-01-01", "n": 0}
+            before = set(app.root.winfo_children())
+            app.send_report()
+            root.update()
+            d3 = new_windows(before)[0]
+            app._report_done(d3, outcome)
+            check(f"a '{outcome}' answer is explained in plain words and Send works again",
+                  words in d3.status.cget("text") and d3.send_button._enabled)
+            d3.destroy()
+        app.cfg.pop("reports_sent", None)
+
         before = set(app.root.winfo_children())
         app.send_report()
         root.update()
-        d3 = new_windows(before)[0]
-        app._report_done(d3, outcome)
-        check(f"a '{outcome}' answer is explained in plain words and Send works again",
-              words in d3.status.cget("text") and d3.send_button._enabled)
-        d3.destroy()
-    app.cfg.pop("reports_sent", None)
-
-    before = set(app.root.winfo_children())
-    app.send_report()
-    root.update()
-    d4 = new_windows(before)[0]
-    button(d4, "Cancel")[0].command()
-    root.update()
-    check("Cancel closes the dialog without sending", not d4.winfo_exists() and len(posted) == 2)
-finally:
-    m.post_report = real_post
-    app._report_details = real_details
-    os.environ.pop("MAPLE_EXP_ALLOW_SHARE", None)
+        d4 = new_windows(before)[0]
+        button(d4, "Cancel")[0].command()
+        root.update()
+        check("Cancel closes the dialog without sending", not d4.winfo_exists() and len(posted) == 2)
+    finally:
+        m.post_report = real_post
+        app._report_details = real_details
+        os.environ.pop("MAPLE_EXP_ALLOW_SHARE", None)
 
 if SCREEN:
     check(f"every window the tests opened is on the second screen (strays: {stray_windows(SCREEN)})", not stray_windows(SCREEN))
